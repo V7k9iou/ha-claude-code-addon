@@ -1,0 +1,15 @@
+#!/bin/bash
+# Get the current state of a Home Assistant entity.
+# Usage: ha-state <entity_id>
+set -euo pipefail
+
+if [[ $# -lt 1 ]]; then
+    echo "Usage: ha-state <entity_id>" >&2
+    echo "Example: ha-state light.kitchen" >&2
+    exit 1
+fi
+
+curl -sSL --fail-with-body \
+    -H "Authorization: Bearer ${SUPERVISOR_TOKEN}" \
+    "http://supervisor/core/api/states/$1" \
+    | jq .

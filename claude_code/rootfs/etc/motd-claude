@@ -1,0 +1,28 @@
+
+================================================================================
+  Home Assistant — Claude Code Add-on
+================================================================================
+
+  Run `claude` to start a Claude Code session.
+
+  Mapped Home Assistant paths:
+    /homeassistant       HA config (configuration.yaml, automations, scenes...)
+    /share               Shared folder
+    /media               Media folder
+    /addons              Local add-ons (read-only)
+    /addon_configs       All add-on configs
+    /ssl                 SSL certs (read-only)
+    /backup              Backups (read-only)
+    /workspace           Convenience symlinks to all of the above
+    /data                Persistent add-on storage (Claude config, SSH keys)
+
+  Helpers (use $SUPERVISOR_TOKEN automatically):
+    ha-state <entity>             Get current state of an entity
+    ha-call-service <d> <s> [j]   Call a service (e.g. light.turn_on)
+    ha-list-entities [pattern]    List entity ids
+    ha-check-config               Validate configuration.yaml
+    ha-restart                    Restart Home Assistant Core
+    ha-token                      Print SUPERVISOR_TOKEN
+
+  See /workspace/CLAUDE.md for the full operator briefing.
+================================================================================

@@ -1,0 +1,74 @@
+name: Claude Code
+version: "0.1.0"
+slug: claude_code
+description: SSH into a container with Claude Code installed and broad access to your Home Assistant config and APIs
+url: "https://github.com/talcum/ha-claude-code-addon"
+arch:
+  - aarch64
+  - amd64
+
+# s6-overlay v3 must be PID 1
+init: false
+
+# Boot before HA Core so SSH is reachable even if HA itself is misbehaving
+startup: services
+boot: auto
+stage: experimental
+
+# API access
+homeassistant_api: true
+hassio_api: true
+hassio_role: manager
+auth_api: true
+
+# Networking
+host_network: false
+ports:
+  "22222/tcp": 22222
+ports_description:
+  "22222/tcp": SSH server (Claude Code shell)
+
+# Filesystem mappings — broad on purpose, since Claude Code is the operator
+map:
+  - homeassistant_config:rw
+  - addon_config:rw
+  - all_addon_configs:rw
+  - share:rw
+  - media:rw
+  - addons:ro
+  - ssl:ro
+  - backup:ro
+
+# Default permissive AppArmor (custom profile can be added later)
+apparmor: false
+
+# Backups: stop the SSH session during backup to ensure consistency
+backup: cold
+
+# Watchdog hits the SSH port to make sure sshd is alive
+watchdog: "tcp://[HOST]:[PORT:22222]"
+
+options:
+  ssh:
+    username: claude
+    password: ""
+    authorized_keys: []
+    port: 22222
+  claude:
+    anthropic_api_key: ""
+    oauth_token: ""
+    permission_mode: default
+  log_level: info
+
+schema:
+  ssh:
+    username: str
+    password: password?
+    authorized_keys:
+      - str
+    port: port
+  claude:
+    anthropic_api_key: password?
+    oauth_token: password?
+    permission_mode: list(default|acceptEdits|plan|bypassPermissions)?
+  log_level: list(trace|debug|info|notice|warning|error|fatal)?

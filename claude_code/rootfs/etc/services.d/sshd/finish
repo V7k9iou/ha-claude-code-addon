@@ -1,0 +1,16 @@
+#!/usr/bin/env bashio
+# ==============================================================================
+# If sshd dies for any reason other than clean shutdown, halt the whole add-on
+# so Supervisor restarts it (rather than s6 restarting just sshd in a tight
+# loop with the same broken config).
+# ==============================================================================
+
+declare exit_code=${1}
+
+if [[ "${exit_code}" -ne 0 ]] && [[ "${exit_code}" -ne 256 ]]; then
+    bashio::log.warning "sshd exited with code ${exit_code}; halting add-on for restart"
+    echo "${exit_code}" > /run/s6-linux-init-container-results/exitcode
+    exec /run/s6/basedir/bin/halt
+fi
+
+bashio::log.info "sshd exited cleanly"

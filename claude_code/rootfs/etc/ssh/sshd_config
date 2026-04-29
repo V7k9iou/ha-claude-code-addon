@@ -1,0 +1,31 @@
+# Port is set on the sshd command line from add-on options
+HostKey /etc/ssh/ssh_host_rsa_key
+HostKey /etc/ssh/ssh_host_ed25519_key
+HostKey /etc/ssh/ssh_host_ecdsa_key
+
+# Auth posture
+PermitRootLogin no
+PermitEmptyPasswords no
+PasswordAuthentication yes
+PubkeyAuthentication yes
+ChallengeResponseAuthentication no
+KbdInteractiveAuthentication no
+UsePAM no
+
+# Forwarding
+X11Forwarding no
+AllowTcpForwarding yes
+GatewayPorts no
+
+# Allow PermitUserEnvironment so the operator can extend env via ~/.ssh/environment
+PermitUserEnvironment yes
+
+# SFTP for file transfers (handy for editing files from a desktop client)
+Subsystem sftp /usr/lib/ssh/sftp-server
+
+# Keepalives — useful since the operator might leave a session open for hours
+ClientAliveInterval 60
+ClientAliveCountMax 10
+TCPKeepAlive yes
+
+LogLevel INFO

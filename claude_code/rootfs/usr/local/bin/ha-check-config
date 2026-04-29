@@ -1,0 +1,9 @@
+#!/bin/bash
+# Validate Home Assistant's configuration.yaml. Returns the result JSON.
+# Run this before ha-restart after editing config files.
+set -euo pipefail
+
+curl -sSL --fail-with-body -X POST \
+    -H "Authorization: Bearer ${SUPERVISOR_TOKEN}" \
+    "http://supervisor/core/api/config/core/check_config" \
+    | jq .

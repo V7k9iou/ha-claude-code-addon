@@ -1,0 +1,13 @@
+#!/bin/bash
+# List all Home Assistant entity ids, optionally filtered by a regex.
+# Usage: ha-list-entities [pattern]
+# Example: ha-list-entities '^light\.'
+set -euo pipefail
+
+filter=${1:-.}
+
+curl -sSL --fail-with-body \
+    -H "Authorization: Bearer ${SUPERVISOR_TOKEN}" \
+    "http://supervisor/core/api/states" \
+    | jq -r --arg pat "$filter" '.[] | .entity_id | select(test($pat))' \
+    | sort

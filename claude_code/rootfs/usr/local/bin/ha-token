@@ -1,0 +1,3 @@
+#!/bin/bash
+# Print the Supervisor token (use with caution; it's a privileged credential).
+echo "${SUPERVISOR_TOKEN}"

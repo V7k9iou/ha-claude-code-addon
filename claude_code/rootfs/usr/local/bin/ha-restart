@@ -1,0 +1,21 @@
+#!/bin/bash
+# Restart Home Assistant Core. Validates config first; aborts if invalid.
+set -euo pipefail
+
+echo "Validating configuration.yaml..."
+result=$(curl -sSL --fail-with-body -X POST \
+    -H "Authorization: Bearer ${SUPERVISOR_TOKEN}" \
+    "http://supervisor/core/api/config/core/check_config")
+
+echo "${result}" | jq .
+
+if ! echo "${result}" | jq -e '.result == "valid"' >/dev/null; then
+    echo "ERROR: configuration is not valid; refusing to restart" >&2
+    exit 1
+fi
+
+echo "Configuration valid. Restarting Home Assistant Core..."
+curl -sSL --fail-with-body -X POST \
+    -H "Authorization: Bearer ${SUPERVISOR_TOKEN}" \
+    "http://supervisor/core/restart" \
+    | jq .

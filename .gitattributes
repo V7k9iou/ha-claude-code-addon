@@ -1,0 +1,5 @@
+* text=auto eol=lf
+*.sh text eol=lf
+rootfs/etc/cont-init.d/* text eol=lf
+rootfs/etc/services.d/**/run text eol=lf
+rootfs/etc/services.d/**/finish text eol=lf

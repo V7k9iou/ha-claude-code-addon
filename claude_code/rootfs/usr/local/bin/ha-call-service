@@ -1,0 +1,22 @@
+#!/bin/bash
+# Call a Home Assistant service.
+# Usage: ha-call-service <domain> <service> [<json-data>]
+# Example: ha-call-service light turn_on '{"entity_id":"light.kitchen"}'
+set -euo pipefail
+
+if [[ $# -lt 2 ]]; then
+    echo "Usage: ha-call-service <domain> <service> [<json-data>]" >&2
+    echo "Example: ha-call-service light turn_on '{\"entity_id\":\"light.kitchen\"}'" >&2
+    exit 1
+fi
+
+domain=$1
+service=$2
+data=${3:-'{}'}
+
+curl -sSL --fail-with-body -X POST \
+    -H "Authorization: Bearer ${SUPERVISOR_TOKEN}" \
+    -H "Content-Type: application/json" \
+    -d "${data}" \
+    "http://supervisor/core/api/services/${domain}/${service}" \
+    | jq .

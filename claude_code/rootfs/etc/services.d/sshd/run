@@ -1,0 +1,22 @@
+#!/usr/bin/with-contenv bashio
+# ==============================================================================
+# OpenSSH daemon — the long-running service. s6 supervises it and will run
+# ./finish if it exits.
+# ==============================================================================
+set -e
+
+declare port
+port=$(bashio::config 'ssh.port' '22222')
+
+# Alpine sshd needs /run/sshd to exist
+mkdir -p /run/sshd
+
+bashio::log.info "Starting SSH daemon on port ${port}"
+
+# -D: don't daemonize (s6 supervises)
+# -e: log to stderr (Supervisor pipes that into the add-on log tab)
+exec /usr/sbin/sshd \
+    -D \
+    -e \
+    -p "${port}" \
+    -f /etc/ssh/sshd_config
