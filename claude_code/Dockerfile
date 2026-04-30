@@ -22,6 +22,7 @@ RUN apk add --no-cache \
         openssh-keygen \
         openssh-server \
         openssh-sftp-server \
+        python3 \
         ripgrep \
         shadow \
         sqlite \
