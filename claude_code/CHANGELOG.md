@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.1 — bug fixes
+
+- Fix `ssh.authorized_keys` not being written to `/data/home/.ssh/authorized_keys`
+  on container start, leaving SSH key auth silently broken (#1)
+
 ## 0.1.0 — initial release
 
 - OpenSSH server (port 22222 by default) with password and key-based auth
