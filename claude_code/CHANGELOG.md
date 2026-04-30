@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.2 — runtime additions
+
+- Bake `python3` into the image so it's available from first boot, instead
+  of needing a manual `apk add python3` after every add-on rebuild (#3)
+
 ## 0.1.1 — bug fixes
 
 - Fix `ssh.authorized_keys` not being written to `/data/home/.ssh/authorized_keys`
