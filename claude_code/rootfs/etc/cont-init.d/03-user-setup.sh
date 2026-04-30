@@ -46,10 +46,15 @@ chmod 700 "${HOME_DIR}/.ssh"
 KEYS_FILE="${HOME_DIR}/.ssh/authorized_keys"
 : > "${KEYS_FILE}"
 if bashio::config.has_value 'ssh.authorized_keys'; then
+    # Capture into a variable first; feeding `bashio::config` for an array
+    # directly into `< <(...)` under bashio strict mode (errexit/pipefail)
+    # silently yields an empty stream, so the loop iterates 0 times and the
+    # keys never land in the file.
+    keys_out=$(bashio::config 'ssh.authorized_keys')
     while read -r key; do
         [[ -z "${key}" ]] && continue
         echo "${key}" >> "${KEYS_FILE}"
-    done < <(bashio::config 'ssh.authorized_keys')
+    done <<< "${keys_out}"
     bashio::log.info "$(wc -l < "${KEYS_FILE}") authorized_keys configured"
 fi
 chmod 600 "${KEYS_FILE}"
