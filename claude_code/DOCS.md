@@ -123,6 +123,71 @@ API access:
 
 The bearer token is in `$SUPERVISOR_TOKEN` in every login shell.
 
+## Headless launches (iOS Shortcut, cron, automation)
+
+If you want to start a Claude Code session from something *other* than an
+interactive SSH terminal — e.g. an iOS Shortcut that triggers a [Remote
+Control](https://code.claude.com/docs/en/remote-control) session you can
+drive from the Claude mobile app — you need to detach `claude` from the
+SSH connection so it keeps running after the connection drops. `tmux` is
+installed in the container for exactly this.
+
+The recipe (also works as the script body of an iOS Shortcuts "Run script
+over SSH" action):
+
+```sh
+/usr/bin/tmux has-session -t claude 2>/dev/null \
+  || /usr/bin/tmux new-session -d -s claude \
+       "bash -lc 'cd /data/home && /usr/local/bin/claude --rc'" \
+       >/dev/null 2>&1
+```
+
+What each piece does:
+
+- `tmux has-session -t claude || tmux new-session -d -s claude '...'` —
+  start the session if it isn't already running, otherwise no-op. Re-runs
+  of the shortcut won't pile up duplicate sessions.
+- `--rc` — start with [Remote
+  Control](https://code.claude.com/docs/en/remote-control) so the session
+  shows up in the Claude mobile app and at claude.ai/code. (Equivalent to
+  flipping "Enable Remote Control for all sessions" in `/config`.)
+
+Attach to the running session interactively from a regular SSH login:
+
+```sh
+tmux attach -t claude
+```
+
+Detach again with `Ctrl-b d` — the session keeps running.
+
+> ⚠️ **Don't add `--dangerously-skip-permissions`** to a headless launch.
+> It triggers its own blocking confirmation dialog ("Bypass Permissions
+> mode warning") whose default selection is "No, exit" — the session sits
+> there waiting for input that never comes. The add-on's permission
+> settings (`claude.permission_mode: auto`, plus the staged `allow` list
+> in `/data/claude/settings.json`) already cover the common case.
+
+### Setting up an iOS Shortcut
+
+1. Add the **Run script over SSH** action.
+2. **Host**: your HA host's hostname or IP (not the add-on's internal
+   `172.30.x.x`).
+3. **Port**: `22222` (or whatever you set `ssh.port` to).
+4. **User**: matches `ssh.username` in the add-on options.
+5. **SSH Key**: pick or generate an ed25519 key in Shortcuts; the
+   **public** half goes in `ssh.authorized_keys` in the add-on
+   configuration. The Shortcuts SSH-key picker offers a "Share" option to
+   copy the public key.
+6. **Script**: paste the tmux line above.
+
+After running the shortcut, the new session appears in the Claude mobile
+app within a few seconds.
+
+The add-on pre-accepts the workspace trust dialog for `/data/home` and
+`/workspace` at first start (see
+`rootfs/etc/cont-init.d/06-claude-state.sh`), so headless launches don't
+get stuck at the "Do you trust this folder?" prompt.
+
 ## Persistence
 
 Only `/data` survives add-on updates. The add-on stores:
