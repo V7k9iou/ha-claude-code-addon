@@ -36,6 +36,8 @@ claude:
   anthropic_api_key: sk-ant-...   # set this, OR
   oauth_token: ""                 # set this (from `claude setup-token`)
   permission_mode: acceptEdits
+  model: ""                       # optional: opus / sonnet / haiku / a full model ID
+  effort: ""                      # optional: low / medium / high / xhigh
 log_level: info
 ```
 
@@ -50,6 +52,8 @@ log_level: info
 | `claude.anthropic_api_key` | password | Direct API key (`sk-ant-...`). Use this **or** `oauth_token`. |
 | `claude.oauth_token` | password | Long-lived OAuth token from `claude setup-token` on a desktop with browser access. Use if you have a Pro/Max subscription. |
 | `claude.permission_mode` | enum | Permission posture for Claude Code: `default`, `acceptEdits`, `plan`, `bypassPermissions`. Default: `acceptEdits`. Only takes effect on a fresh install (or a reinstall with a wiped `/data`) — see "Changing the permission mode later" below. |
+| `claude.model` | string | Model for Claude Code: an alias (`opus` / `sonnet` / `haiku`) or a full model ID (e.g. `claude-opus-4-7`). Leave empty for Claude Code's own default. Unlike `permission_mode`, this is re-applied on every start — see "Model and effort" below. |
+| `claude.effort` | enum | Reasoning effort level: `low`, `medium`, `high`, `xhigh`. Leave empty for the model's default. Re-applied on every start. |
 | `log_level` | enum | Add-on log verbosity: `trace`, `debug`, `info`, `notice`, `warning`, `error`, `fatal`. |
 
 ### Recommended permission modes
@@ -81,6 +85,27 @@ exist (so it never clobbers a settings file you've customised). That means:
   new session picks it up. The file is under `/data`, so the edit survives
   add-on updates. You can also pre-bless recurring actions by adding patterns
   to the `permissions.allow` list there instead of loosening the mode.
+
+### Model and effort
+
+`claude.model` and `claude.effort` let you pick which model Claude Code runs
+and how hard it thinks, without hand-editing anything on the box:
+
+- **`claude.model`** — an alias (`opus`, `sonnet`, `haiku`) or a full model ID
+  (`claude-opus-4-7`, `claude-sonnet-4-6`, …). Empty ⇒ Claude Code's default.
+  It's written into `/data/claude/settings.json` as the `model` key.
+- **`claude.effort`** — `low` / `medium` / `high` / `xhigh`. Empty ⇒ the
+  model's default. It's exported as `CLAUDE_CODE_EFFORT_LEVEL` in
+  `~/.claude_env` rather than written to `settings.json`'s `effortLevel`,
+  because the env var also overrides Opus 4.7's one-time "launch effort" pin
+  (xhigh on the first session) — the settings key alone doesn't, so a bare
+  `effortLevel` would be ignored until you changed effort manually once.
+
+Unlike `claude.permission_mode` (which is only consulted when `settings.json`
+is first staged), these two are **re-applied on every container start** — set
+them in the Configuration tab and restart the add-on, no `/data` wipe needed.
+Leaving an option empty leaves the corresponding key/var alone, so a value you
+hand-set in `settings.json` survives.
 
 ### First-time auth
 
@@ -170,12 +195,17 @@ What each piece does:
 - `bash -lc '...'` — a **login** shell (`-l`). That matters: a login shell
   reads `/etc/profile`, which runs `/etc/profile.d/01-claude-env.sh`, which
   sources `~/.claude_env`. That's what gives the headless `claude` its
-  `CLAUDE_CONFIG_DIR` (so it reads `/data/claude/settings.json` — the file
-  staged from `claude.permission_mode` and the `allow` list — rather than the
-  per-home default), its Claude Code auth, and `$SUPERVISOR_TOKEN`. Drop the
-  `-l` and you lose all three. (`~/.bashrc` only sources `~/.claude_env` for
-  *interactive* shells, which a `bash -c` from a Shortcut isn't — added in
-  v0.1.4.)
+  `CLAUDE_CONFIG_DIR` (so it reads `/data/claude/settings.json` — the file the
+  add-on stages from `claude.permission_mode` / `claude.model` and the `allow`
+  list — rather than the per-home default), its `CLAUDE_CODE_EFFORT_LEVEL` (if
+  `claude.effort` is set), its Claude Code auth, and `$SUPERVISOR_TOKEN`. Drop
+  the `-l` and you lose all of it. (`~/.bashrc` only sources `~/.claude_env`
+  for *interactive* shells, which a `bash -c` from a Shortcut isn't — added in
+  v0.1.4.) Note the flip side: before v0.1.4 a headless launch had no
+  `CLAUDE_CONFIG_DIR`, so it read the per-home default `~/.claude/settings.json`
+  — if you hand-edited *that* file on an older version, a headless `claude`
+  stops reading it after the update; move those settings into
+  `/data/claude/settings.json` (or the matching add-on options).
 - `--rc` — start with [Remote
   Control](https://code.claude.com/docs/en/remote-control) so the session
   shows up in the Claude mobile app and at claude.ai/code. (Equivalent to

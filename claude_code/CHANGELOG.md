@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.1.5 — model and effort options
+
+- New `claude.model` option — set Claude Code's model from the Configuration
+  tab: an alias (`opus` / `sonnet` / `haiku`) or a full ID (`claude-opus-4-7`,
+  …). Written into `/data/claude/settings.json` as the `model` key. Empty ⇒
+  Claude Code's default.
+- New `claude.effort` option — reasoning effort level (`low` / `medium` /
+  `high` / `xhigh`). Exported as `CLAUDE_CODE_EFFORT_LEVEL` in `~/.claude_env`
+  rather than written to `settings.json`'s `effortLevel`: the env var also
+  overrides Opus 4.7's one-time "launch effort" pin (xhigh on the first
+  session), which the `effortLevel` key by itself doesn't — so a bare
+  `effortLevel` would be silently ignored on Opus 4.7 until you changed effort
+  manually once. Empty ⇒ the model's default.
+- Both are **re-applied on every container start** (`~/.claude_env` is rebuilt
+  from the options each boot; `04-claude-env.sh` re-syncs the `model` key in
+  `settings.json` via `jq`) — unlike `claude.permission_mode`, which is only
+  consulted when `settings.json` is first staged. So you can change model/effort
+  on an existing install and just restart the add-on; no `/data` wipe. Leaving
+  an option empty leaves the corresponding key/var untouched, so a hand-set
+  value survives.
+- DOCS: new "Model and effort" section; the two new options in the reference
+  table and the example config; a note that since v0.1.4 a headless launch
+  reads `/data/claude/settings.json` (not the per-home `~/.claude/settings.json`),
+  so the add-on options actually reach it now — and anything hand-edited into
+  `~/.claude/settings.json` on an older version stops being read after the
+  update.
+
 ## 0.1.4 — load the add-on env in headless launches
 
 - Add `/etc/profile.d/01-claude-env.sh`, which sources `~/.claude_env` for all
