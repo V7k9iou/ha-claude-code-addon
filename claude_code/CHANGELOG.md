@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.1.3 — default permission mode + iOS Shortcut docs
+
+- Default `claude.permission_mode` is now `acceptEdits` (was `default`), so a
+  fresh install auto-accepts file edits and only prompts for Bash commands
+  outside the staged `allow` list — much less interactive friction for the
+  trusted-operator workflow this add-on is built for, without removing the
+  checkpoint on shell commands. Override per-install in the Configuration tab
+  (`default` / `acceptEdits` / `plan` / `bypassPermissions`).
+- Note: `04-claude-env.sh` still only stages `settings.json` if it's missing,
+  so an existing `/data/claude/settings.json` keeps whatever `defaultMode` it
+  already has — this change affects fresh installs (and reinstalls with a wiped
+  `/data`). To change the mode on an existing install, edit
+  `/data/claude/settings.json` directly.
+- README: documented the iOS Shortcut "Run script over SSH" recipe (the
+  detached-`tmux` + `claude --rc` headless launch) alongside the existing
+  coverage in `DOCS.md`.
+
 ## 0.1.2 — runtime additions
 
 - Bake `python3` into the image so it's available from first boot, instead

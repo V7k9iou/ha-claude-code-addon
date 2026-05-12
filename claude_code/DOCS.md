@@ -35,7 +35,7 @@ ssh:
 claude:
   anthropic_api_key: sk-ant-...   # set this, OR
   oauth_token: ""                 # set this (from `claude setup-token`)
-  permission_mode: default
+  permission_mode: acceptEdits
 log_level: info
 ```
 
@@ -49,18 +49,38 @@ log_level: info
 | `ssh.port` | port | SSH server port (default: 22222). |
 | `claude.anthropic_api_key` | password | Direct API key (`sk-ant-...`). Use this **or** `oauth_token`. |
 | `claude.oauth_token` | password | Long-lived OAuth token from `claude setup-token` on a desktop with browser access. Use if you have a Pro/Max subscription. |
-| `claude.permission_mode` | enum | Default permission posture for Claude Code: `default`, `acceptEdits`, `plan`, `bypassPermissions`. |
+| `claude.permission_mode` | enum | Permission posture for Claude Code: `default`, `acceptEdits`, `plan`, `bypassPermissions`. Default: `acceptEdits`. Only takes effect on a fresh install (or a reinstall with a wiped `/data`) — see "Changing the permission mode later" below. |
 | `log_level` | enum | Add-on log verbosity: `trace`, `debug`, `info`, `notice`, `warning`, `error`, `fatal`. |
 
 ### Recommended permission modes
 
 For an SSH-into-container workflow where you trust the operator:
 
-- **`default`** — prompts for tool calls. Safe but interactive.
-- **`acceptEdits`** — auto-accepts file edits but still prompts for Bash.
-  Reasonable middle ground.
-- **`bypassPermissions`** — no prompts. Convenient when you're babysitting
-  the session; rough if you're stepping away.
+- **`default`** — prompts for every tool call. Safest, but interactive enough
+  to be annoying for routine HA work.
+- **`acceptEdits`** — auto-accepts file edits but still prompts for Bash
+  commands outside the staged `allow` list. **This is the add-on's default**:
+  a reasonable middle ground for a single trusted operator.
+- **`bypassPermissions`** — no prompts at all. Convenient when you're
+  babysitting the session; rough if you step away, given this container's rw
+  access to `/homeassistant` and the Supervisor `manager` API.
+
+### Changing the permission mode later
+
+The `claude.permission_mode` option is only consulted when the add-on **stages
+`/data/claude/settings.json`**, which it does only if that file doesn't already
+exist (so it never clobbers a settings file you've customised). That means:
+
+- **Fresh install, or reinstall after wiping `/data`** — `settings.json` is
+  written from the option. Set it in the Configuration tab before/at first
+  start.
+- **Existing install** — `/data/claude/settings.json` already exists, so
+  changing the Configuration-tab option does nothing. Edit the file directly:
+  set `"defaultMode"` to `"default"` / `"acceptEdits"` / `"bypassPermissions"`,
+  then restart the add-on (or `tmux kill-session -t claude` and relaunch) so a
+  new session picks it up. The file is under `/data`, so the edit survives
+  add-on updates. You can also pre-bless recurring actions by adding patterns
+  to the `permissions.allow` list there instead of loosening the mode.
 
 ### First-time auth
 
@@ -160,12 +180,14 @@ tmux attach -t claude
 
 Detach again with `Ctrl-b d` — the session keeps running.
 
-> ⚠️ **Don't add `--dangerously-skip-permissions`** to a headless launch.
-> It triggers its own blocking confirmation dialog ("Bypass Permissions
-> mode warning") whose default selection is "No, exit" — the session sits
-> there waiting for input that never comes. The add-on's permission
-> settings (`claude.permission_mode: auto`, plus the staged `allow` list
-> in `/data/claude/settings.json`) already cover the common case.
+> ⚠️ **Don't add `--dangerously-skip-permissions`** (or `--permission-mode …`)
+> to a headless launch. The dangerous flag triggers its own blocking
+> confirmation dialog ("Bypass Permissions mode warning") whose default
+> selection is "No, exit" — the session sits there waiting for input that
+> never comes. Set the permission posture via the add-on's
+> `claude.permission_mode` option / `defaultMode` in
+> `/data/claude/settings.json` instead (default `acceptEdits`, plus the staged
+> `allow` list) — that path doesn't pop a launch-time dialog.
 
 ### Setting up an iOS Shortcut
 
