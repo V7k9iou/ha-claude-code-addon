@@ -167,6 +167,15 @@ What each piece does:
 - `tmux has-session -t claude || tmux new-session -d -s claude '...'` —
   start the session if it isn't already running, otherwise no-op. Re-runs
   of the shortcut won't pile up duplicate sessions.
+- `bash -lc '...'` — a **login** shell (`-l`). That matters: a login shell
+  reads `/etc/profile`, which runs `/etc/profile.d/01-claude-env.sh`, which
+  sources `~/.claude_env`. That's what gives the headless `claude` its
+  `CLAUDE_CONFIG_DIR` (so it reads `/data/claude/settings.json` — the file
+  staged from `claude.permission_mode` and the `allow` list — rather than the
+  per-home default), its Claude Code auth, and `$SUPERVISOR_TOKEN`. Drop the
+  `-l` and you lose all three. (`~/.bashrc` only sources `~/.claude_env` for
+  *interactive* shells, which a `bash -c` from a Shortcut isn't — added in
+  v0.1.4.)
 - `--rc` — start with [Remote
   Control](https://code.claude.com/docs/en/remote-control) so the session
   shows up in the Claude mobile app and at claude.ai/code. (Equivalent to
@@ -180,14 +189,21 @@ tmux attach -t claude
 
 Detach again with `Ctrl-b d` — the session keeps running.
 
-> ⚠️ **Don't add `--dangerously-skip-permissions`** (or `--permission-mode …`)
-> to a headless launch. The dangerous flag triggers its own blocking
-> confirmation dialog ("Bypass Permissions mode warning") whose default
-> selection is "No, exit" — the session sits there waiting for input that
-> never comes. Set the permission posture via the add-on's
-> `claude.permission_mode` option / `defaultMode` in
-> `/data/claude/settings.json` instead (default `acceptEdits`, plus the staged
-> `allow` list) — that path doesn't pop a launch-time dialog.
+> ⚠️ **Don't use Bypass Permissions mode with a headless launch.** Whether you
+> set it via `--dangerously-skip-permissions` on the command line *or* via
+> `permission_mode: bypassPermissions` / `"defaultMode": "bypassPermissions"`
+> in settings, Claude Code shows a blocking "WARNING: Claude Code running in
+> Bypass Permissions mode" confirmation on **every** fresh session, with
+> "No, exit" preselected. A headless `--rc` launch has no one at the terminal
+> to choose "Yes" — so the session hangs on the dialog, never starts Remote
+> Control, and never appears in the Claude mobile app. (If you ever see "the
+> shortcut runs but no session shows up," `tmux attach -t claude` and you'll
+> find it sitting on this dialog.) For a headless launch, use `default`,
+> `acceptEdits`, or `plan` — set via the `claude.permission_mode` option or
+> `"defaultMode"` in settings; those don't pop a launch-time dialog. To cut
+> down on prompts in `acceptEdits`/`default` without going to bypass, add the
+> command patterns you keep approving to the `permissions.allow` list in
+> settings.
 
 ### Setting up an iOS Shortcut
 

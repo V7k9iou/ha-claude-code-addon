@@ -48,6 +48,7 @@ COPY rootfs /
 # even if the source repo loses the +x bit on Windows / weird filesystems.)
 RUN chmod a+x \
         /etc/cont-init.d/*.sh \
+        /etc/profile.d/*.sh \
         /etc/services.d/sshd/run \
         /etc/services.d/sshd/finish \
         /usr/local/bin/ha-call-service \

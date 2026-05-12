@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.1.4 — load the add-on env in headless launches
+
+- Add `/etc/profile.d/01-claude-env.sh`, which sources `~/.claude_env` for all
+  login shells — not just interactive ones. Without it, a headless launch (the
+  `bash -lc '... claude --rc'` an iOS Shortcut / cron uses) is non-interactive,
+  so `~/.bashrc` never runs and `~/.claude_env` is never loaded. The
+  consequences were silent and confusing: `claude` ran with **no
+  `CLAUDE_CONFIG_DIR`**, so it read settings from the per-home default
+  (`~/.claude/settings.json`) instead of the add-on's staged
+  `/data/claude/settings.json` — i.e. the `claude.permission_mode` option (and
+  any edits to that file) had no effect on shortcut-launched sessions; it also
+  had no Claude Code auth env and no `$SUPERVISOR_TOKEN` in the environment, so
+  it only worked at all if a `claude /login` credential happened to be in the
+  default config dir, and the `ha-*` helpers / `curl http://supervisor/...`
+  needed a manual `. ~/.claude_env` prepended. With this file, headless
+  launches behave like an interactive login: right config dir, working auth,
+  `$SUPERVISOR_TOKEN` available.
+- `chmod a+x` `/etc/profile.d/*.sh` in the image build (alongside the
+  cont-init scripts) so the bit is correct regardless of how the repo was
+  checked out.
+- DOCS: hardened the "don't use Bypass Permissions mode headless" warning — it
+  applies to `permission_mode: bypassPermissions` / `"defaultMode":
+  "bypassPermissions"` in settings, not just the `--dangerously-skip-permissions`
+  flag. Both pop a blocking "Bypass Permissions mode" confirmation on every
+  fresh session, so a headless `--rc` launch hangs on the dialog and never
+  appears in the mobile app. For headless, use `default` / `acceptEdits` /
+  `plan` and widen the `allow` list to taste.
+
 ## 0.1.3 — default permission mode + iOS Shortcut docs
 
 - Default `claude.permission_mode` is now `acceptEdits` (was `default`), so a

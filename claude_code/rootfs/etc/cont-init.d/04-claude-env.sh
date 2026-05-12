@@ -1,10 +1,17 @@
 #!/usr/bin/with-contenv bashio
 # ==============================================================================
-# Stage Claude Code environment + a sensible default settings.json. SSH login
-# sessions source ~/.claude_env, which carries:
-#   - SUPERVISOR_TOKEN (for /api/* via http://supervisor)
+# Stage the Claude Code environment + a sensible default settings.json.
+#
+# ~/.claude_env carries:
+#   - SUPERVISOR_TOKEN (for /api/* via http://supervisor and the ha-* helpers)
 #   - ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN (auth for Claude Code)
-#   - CLAUDE_CONFIG_DIR (so /login state persists in /data)
+#   - CLAUDE_CONFIG_DIR (so settings.json / /login state live under /data)
+#   - USE_BUILTIN_RIPGREP
+# It is sourced by ~/.bashrc (interactive shells) AND by
+# /etc/profile.d/01-claude-env.sh (all login shells, including the
+# non-interactive `bash -lc` an iOS Shortcut / cron uses to launch claude --rc),
+# so headless launches get the same config dir, auth, and $SUPERVISOR_TOKEN as
+# an interactive login.
 # ==============================================================================
 set -e
 

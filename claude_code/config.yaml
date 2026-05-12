@@ -1,5 +1,5 @@
 name: Claude Code
-version: "0.1.3"
+version: "0.1.4"
 slug: claude_code
 description: SSH into a container with Claude Code installed and broad access to your Home Assistant config and APIs
 url: "https://github.com/talcum/ha-claude-code-addon"
