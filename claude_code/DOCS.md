@@ -37,7 +37,7 @@ claude:
   oauth_token: ""                 # set this (from `claude setup-token`)
   permission_mode: acceptEdits
   model: ""                       # optional: opus / sonnet / haiku / a full model ID
-  effort: ""                      # optional: low / medium / high / xhigh
+  effort: default                 # default / low / medium / high / xhigh
 log_level: info
 ```
 
@@ -53,7 +53,7 @@ log_level: info
 | `claude.oauth_token` | password | Long-lived OAuth token from `claude setup-token` on a desktop with browser access. Use if you have a Pro/Max subscription. |
 | `claude.permission_mode` | enum | Permission posture for Claude Code: `default`, `acceptEdits`, `plan`, `bypassPermissions`. Default: `acceptEdits`. Only takes effect on a fresh install (or a reinstall with a wiped `/data`) — see "Changing the permission mode later" below. |
 | `claude.model` | string | Model for Claude Code: an alias (`opus` / `sonnet` / `haiku`) or a full model ID (e.g. `claude-opus-4-7`). Leave empty for Claude Code's own default. Unlike `permission_mode`, this is re-applied on every start — see "Model and effort" below. |
-| `claude.effort` | enum | Reasoning effort level: `low`, `medium`, `high`, `xhigh`. Leave empty for the model's default. Re-applied on every start. |
+| `claude.effort` | enum | Reasoning effort level: `default`, `low`, `medium`, `high`, `xhigh`. `default` leaves the env var unset so Claude Code picks. Re-applied on every start. |
 | `log_level` | enum | Add-on log verbosity: `trace`, `debug`, `info`, `notice`, `warning`, `error`, `fatal`. |
 
 ### Recommended permission modes
@@ -94,12 +94,14 @@ and how hard it thinks, without hand-editing anything on the box:
 - **`claude.model`** — an alias (`opus`, `sonnet`, `haiku`) or a full model ID
   (`claude-opus-4-7`, `claude-sonnet-4-6`, …). Empty ⇒ Claude Code's default.
   It's written into `/data/claude/settings.json` as the `model` key.
-- **`claude.effort`** — `low` / `medium` / `high` / `xhigh`. Empty ⇒ the
-  model's default. It's exported as `CLAUDE_CODE_EFFORT_LEVEL` in
-  `~/.claude_env` rather than written to `settings.json`'s `effortLevel`,
-  because the env var also overrides Opus 4.7's one-time "launch effort" pin
-  (xhigh on the first session) — the settings key alone doesn't, so a bare
-  `effortLevel` would be ignored until you changed effort manually once.
+- **`claude.effort`** — `default` / `low` / `medium` / `high` / `xhigh`.
+  `default` (the option's default) leaves `CLAUDE_CODE_EFFORT_LEVEL` unset so
+  Claude Code picks its own effort. Any other value is exported as
+  `CLAUDE_CODE_EFFORT_LEVEL` in `~/.claude_env` rather than written to
+  `settings.json`'s `effortLevel`, because the env var also overrides Opus
+  4.7's one-time "launch effort" pin (xhigh on the first session) — the
+  settings key alone doesn't, so a bare `effortLevel` would be ignored until
+  you changed effort manually once.
 
 Unlike `claude.permission_mode` (which is only consulted when `settings.json`
 is first staged), these two are **re-applied on every container start** — set

@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.6 — fix invalid default for `claude.effort`
+
+- FIX: `claude.effort` shipped with an empty-string default (`""`) but its
+  schema only accepted `low` / `medium` / `high` / `xhigh`, so the add-on
+  failed config validation on a fresh install ("value must be one of …").
+- The enum now includes a `default` sentinel (the new default value) which
+  leaves `CLAUDE_CODE_EFFORT_LEVEL` unset, so Claude Code picks its own
+  effort. The field stays visible in the Configuration tab.
+
 ## 0.1.5 — model and effort options
 
 - New `claude.model` option — set Claude Code's model from the Configuration

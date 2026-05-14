@@ -1,5 +1,5 @@
 name: Claude Code
-version: "0.1.5"
+version: "0.1.6"
 slug: claude_code
 description: SSH into a container with Claude Code installed and broad access to your Home Assistant config and APIs
 url: "https://github.com/talcum/ha-claude-code-addon"
@@ -59,7 +59,7 @@ options:
     oauth_token: ""
     permission_mode: acceptEdits
     model: ""
-    effort: ""
+    effort: default
   log_level: info
 
 schema:
@@ -74,5 +74,5 @@ schema:
     oauth_token: password?
     permission_mode: list(default|acceptEdits|plan|bypassPermissions)?
     model: str?
-    effort: list(low|medium|high|xhigh)?
+    effort: list(default|low|medium|high|xhigh)?
   log_level: list(trace|debug|info|notice|warning|error|fatal)?

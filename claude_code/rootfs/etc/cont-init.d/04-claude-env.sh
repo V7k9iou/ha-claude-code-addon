@@ -54,7 +54,11 @@ ENV_FILE="${HOME_DIR}/.claude_env"
 
     if bashio::config.has_value 'claude.effort'; then
         effort=$(bashio::config 'claude.effort')
-        echo "export CLAUDE_CODE_EFFORT_LEVEL='${effort}'"
+        # 'default' is a sentinel meaning "let the model decide" — skip the
+        # env var so Claude Code's own default kicks in.
+        if [[ "${effort}" != "default" ]]; then
+            echo "export CLAUDE_CODE_EFFORT_LEVEL='${effort}'"
+        fi
     fi
 
     if [[ -n "${SUPERVISOR_TOKEN:-}" ]]; then
