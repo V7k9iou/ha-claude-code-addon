@@ -32,7 +32,9 @@ RUN apk add --no-cache \
 
 # Install Claude Code (npm distribution; per-arch native binary pulled as
 # optional dependency for linux-arm64 / linux-x64).
-RUN npm install -g @anthropic-ai/claude-code \
+# Pinned: bump this to update Claude Code — an unpinned install gets stuck on
+# the Docker layer cache, so rebuilds silently keep the old version.
+RUN npm install -g @anthropic-ai/claude-code@2.1.173 \
     && claude --version
 
 # Use system ripgrep instead of the bundled glibc copy — we're on musl/Alpine.

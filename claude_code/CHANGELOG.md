@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.7 — pin Claude Code version
+
+- Pin Claude Code to `2.1.173` in the Dockerfile (was unpinned). With an
+  unpinned `npm install -g`, the Docker layer cache reused the old install on
+  rebuild, so add-on updates could silently keep a stale Claude Code. Pinning
+  busts the cache on every bump and makes builds reproducible. To update
+  Claude Code from now on: bump the pin in the Dockerfile and the add-on
+  `version` in `config.yaml`, then update the add-on from the store page.
+
 ## 0.1.6 — fix invalid default for `claude.effort`
 
 - FIX: `claude.effort` shipped with an empty-string default (`""`) but its
