@@ -1,15 +1,21 @@
 # Changelog
 
-## 0.1.8 — update Claude Code to 2.1.226
+## 0.1.8 — update Claude Code to 2.1.226, default to Opus
 
 - Bump the Claude Code pin from `2.1.173` (June) to `2.1.226`, the current
   `latest` on npm. The pin had gone two months stale, so fresh installs were
   getting an old Claude Code.
 - Note on tags: npm publishes both `latest` (2.1.226) and `stable` (2.1.220)
   for `@anthropic-ai/claude-code`; `stable` is the slower, staged-rollout
-  channel. This add-on tracks `latest`. Nothing about the *model* changes —
-  `claude.model` still defaults to empty, which leaves Claude Code on whatever
-  its own current default model is.
+  channel. This add-on tracks `latest`.
+- `claude.model` now defaults to `opus` (was empty ⇒ Claude Code's own
+  default). The **alias** is deliberate: Claude Code resolves it at runtime, so
+  the add-on follows the current Opus release without a config edit, where a
+  full model ID would pin you to one model until you changed it by hand.
+- **Upgrading from an earlier version:** Home Assistant keeps the options you
+  already have stored, so a changed default does *not* reach an existing
+  install. If your Configuration tab still shows `model` as empty, set it to
+  `opus` yourself and restart the add-on. Fresh installs get it automatically.
 
 ## 0.1.7 — pin Claude Code version
 

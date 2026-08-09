@@ -58,7 +58,7 @@ options:
     anthropic_api_key: ""
     oauth_token: ""
     permission_mode: acceptEdits
-    model: ""
+    model: opus
     effort: default
   log_level: info
 

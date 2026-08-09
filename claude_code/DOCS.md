@@ -36,7 +36,7 @@ claude:
   anthropic_api_key: sk-ant-...   # set this, OR
   oauth_token: ""                 # set this (from `claude setup-token`)
   permission_mode: acceptEdits
-  model: ""                       # optional: opus / sonnet / haiku / a full model ID
+  model: opus                     # opus / sonnet / haiku / a full model ID / "" for CC's default
   effort: default                 # default / low / medium / high / xhigh
 log_level: info
 ```
@@ -52,7 +52,7 @@ log_level: info
 | `claude.anthropic_api_key` | password | Direct API key (`sk-ant-...`). Use this **or** `oauth_token`. |
 | `claude.oauth_token` | password | Long-lived OAuth token from `claude setup-token` on a desktop with browser access. Use if you have a Pro/Max subscription. |
 | `claude.permission_mode` | enum | Permission posture for Claude Code: `default`, `acceptEdits`, `plan`, `bypassPermissions`. Default: `acceptEdits`. Only takes effect on a fresh install (or a reinstall with a wiped `/data`) — see "Changing the permission mode later" below. |
-| `claude.model` | string | Model for Claude Code: an alias (`opus` / `sonnet` / `haiku`) or a full model ID (e.g. `claude-opus-4-7`). Leave empty for Claude Code's own default. Unlike `permission_mode`, this is re-applied on every start — see "Model and effort" below. |
+| `claude.model` | string | Model for Claude Code: an alias (`opus` / `sonnet` / `haiku`) or a full model ID. Default: `opus`. Leave empty for Claude Code's own default. Unlike `permission_mode`, this is re-applied on every start — see "Model and effort" below. |
 | `claude.effort` | enum | Reasoning effort level: `default`, `low`, `medium`, `high`, `xhigh`. `default` leaves the env var unset so Claude Code picks. Re-applied on every start. |
 | `log_level` | enum | Add-on log verbosity: `trace`, `debug`, `info`, `notice`, `warning`, `error`, `fatal`. |
 
@@ -91,9 +91,15 @@ exist (so it never clobbers a settings file you've customised). That means:
 `claude.model` and `claude.effort` let you pick which model Claude Code runs
 and how hard it thinks, without hand-editing anything on the box:
 
-- **`claude.model`** — an alias (`opus`, `sonnet`, `haiku`) or a full model ID
-  (`claude-opus-4-7`, `claude-sonnet-4-6`, …). Empty ⇒ Claude Code's default.
-  It's written into `/data/claude/settings.json` as the `model` key.
+- **`claude.model`** — an alias (`opus`, `sonnet`, `haiku`) or a full model ID.
+  It's written into `/data/claude/settings.json` as the `model` key. Empty ⇒
+  Claude Code's default.
+
+  The add-on ships with `opus`. **Prefer the alias over a full model ID:** an
+  alias is resolved by Claude Code at runtime, so `opus` follows whatever the
+  current Opus release is and you stay on the newest one without touching the
+  config. A full ID pins you to that exact model until you edit it by hand,
+  and will eventually stop working as old models are retired.
 - **`claude.effort`** — `default` / `low` / `medium` / `high` / `xhigh`.
   `default` (the option's default) leaves `CLAUDE_CODE_EFFORT_LEVEL` unset so
   Claude Code picks its own effort. Any other value is exported as
@@ -108,6 +114,11 @@ is first staged), these two are **re-applied on every container start** — set
 them in the Configuration tab and restart the add-on, no `/data` wipe needed.
 Leaving an option empty leaves the corresponding key/var alone, so a value you
 hand-set in `settings.json` survives.
+
+> **Upgrading from an add-on version before 0.1.8?** Home Assistant keeps the
+> options already stored for your install, so the new `opus` default does not
+> reach you automatically. If the Configuration tab shows `model` as empty, set
+> it to `opus` and restart the add-on.
 
 ### First-time auth
 
