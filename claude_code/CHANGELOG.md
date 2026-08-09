@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.8 — update Claude Code to 2.1.226
+
+- Bump the Claude Code pin from `2.1.173` (June) to `2.1.226`, the current
+  `latest` on npm. The pin had gone two months stale, so fresh installs were
+  getting an old Claude Code.
+- Note on tags: npm publishes both `latest` (2.1.226) and `stable` (2.1.220)
+  for `@anthropic-ai/claude-code`; `stable` is the slower, staged-rollout
+  channel. This add-on tracks `latest`. Nothing about the *model* changes —
+  `claude.model` still defaults to empty, which leaves Claude Code on whatever
+  its own current default model is.
+
 ## 0.1.7 — pin Claude Code version
 
 - Pin Claude Code to `2.1.173` in the Dockerfile (was unpinned). With an
