@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.9 — update Claude Code to 2.1.280
+
+- Bump the Claude Code pin from `2.1.226` to `2.1.280`, the current `latest`
+  on npm (`stable` is `2.1.267`).
+- No model change needed: `claude.model` defaults to the `opus` alias, which
+  Claude Code resolves to the newest Opus release at runtime.
+
 ## 0.1.8 — update Claude Code to 2.1.226, default to Opus
 
 - Bump the Claude Code pin from `2.1.173` (June) to `2.1.226`, the current
