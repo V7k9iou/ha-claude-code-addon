@@ -1,0 +1,4 @@
+# Pinned: the local L01 protocol support in python-roborock is recent and the
+# library moves fast. Bump deliberately, re-test `companion.py --dry-run`.
+python-roborock==7.15.2
+aiomqtt==2.5.1
