@@ -9,4 +9,7 @@
 - Map switches are refused while the robot is mid-job.
 - `Delete unnamed maps` button: removes the auto-built, unnamed maps a lost
   robot creates; never the active map, never a named one; refused mid-job.
+- Consumables (hours left + reset buttons), clean history (last record and
+  lifetime totals) and read-only dock settings, refreshed every 5 min and right
+  after a job ends.
 - Pinned `python-roborock 7.15.2`, `aiomqtt 2.5.1`.

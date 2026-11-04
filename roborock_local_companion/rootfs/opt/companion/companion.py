@@ -12,10 +12,14 @@ Entities created (all under one MQTT device):
   sensor  Robot state          -- charging / segment_cleaning / ... with all raw
                                   status fields as attributes
   sensor  Error                -- robot error name (diagnostic)
-  sensor  Last clean duration  -- minutes (diagnostic)
-  sensor  Last clean area      -- m2 (diagnostic)
   button  Delete unnamed maps  -- removes auto-built maps that have no name;
                                   never the active map, never a named one
+  sensors Consumables          -- hours left on main brush, side brush, filter,
+                                  sensors, plus a reset button for each
+  sensors History              -- last clean start / duration / area / outcome,
+                                  lifetime count / time / area / bin empties
+  sensors Dock settings        -- dust-collection mode, mop wash mode and
+                                  interval (read-only)
 
 Everything else (start/stop/dock/segments/clean mode) deliberately stays on
 Matter, so there is one control path per function and no second source of
@@ -39,7 +43,8 @@ import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from roborock.data.v1.v1_containers import MultiMapsList, StatusV2
+from roborock.data.v1.v1_code_mappings import RoborockDockDustCollectionModeCode
+from roborock.data.v1.v1_containers import CleanRecord, CleanSummary, Consumable, MultiMapsList, StatusV2
 from roborock.devices.transport.local_channel import LocalChannel
 from roborock.exceptions import RoborockException
 from roborock.protocols.v1_protocol import RequestMessage, decode_rpc_response
@@ -52,6 +57,15 @@ ROBOT_RECONNECT_MIN = 5.0
 ROBOT_RECONNECT_MAX = 300.0
 MQTT_RECONNECT = 10.0
 SWITCH_SETTLE = 3.0
+INFO_INTERVAL = 300.0  # consumables / history / dock settings refresh (also right after a job ends)
+
+CONSUMABLE_RESET_KEYS = {
+    "main_brush": "main_brush_work_time",
+    "side_brush": "side_brush_work_time",
+    "filter": "filter_work_time",
+    "sensor": "sensor_dirty_time",
+}
+WASH_TOWEL_MODES = {0: "light", 1: "balanced", 2: "deep"}
 
 # RoborockStateCode values during which a map switch would interrupt a job.
 BUSY_STATES = {
@@ -211,6 +225,31 @@ class Robot:
     async def delete_map(self, flag: int):
         return await self.rpc("del_map", [flag])
 
+    async def consumables(self) -> Consumable:
+        return Consumable.from_dict(self._first(await self.rpc("get_consumable")))
+
+    async def clean_summary(self) -> CleanSummary:
+        return CleanSummary.from_dict(self._first(await self.rpc("get_clean_summary")))
+
+    async def clean_record(self, begin: int) -> CleanRecord:
+        return CleanRecord.from_dict(self._first(await self.rpc("get_clean_record", [begin])))
+
+    async def dock_settings(self) -> dict:
+        out: dict = {}
+        for key, method in (
+            ("dust_collection", "get_dust_collection_mode"),
+            ("wash_towel", "get_wash_towel_mode"),
+            ("smart_wash", "get_smart_wash_params"),
+        ):
+            try:
+                out[key] = self._first(await self.rpc(method))
+            except RoborockException as err:
+                _LOGGER.debug("%s unsupported: %s", method, err)
+        return out
+
+    async def reset_consumable(self, field: str):
+        return await self.rpc("reset_consumable", [field])
+
     async def serial_number(self) -> str | None:
         try:
             data = self._first(await self.rpc("get_serial_number"))
@@ -261,6 +300,8 @@ class Topics:
         self.state = f"{base}/state"
         self.map_set = f"{base}/map/set"
         self.maps_delete_unnamed = f"{base}/maps/delete_unnamed"
+        self.info = f"{base}/info"
+        self.consumable_reset = f"{base}/consumable/reset"
         self.discovery = f"{cfg.discovery_prefix}/device/roborock_local_{cfg.duid}/config"
 
 
@@ -326,29 +367,6 @@ def discovery_payload(cfg: Config, topics: Topics, entries: list[MapEntry], seri
                 icon="mdi:alert-circle-outline",
                 entity_category="diagnostic",
             ),
-            "last_clean_duration": entity(
-                "last_clean_duration",
-                "Last clean duration",
-                domain="sensor",
-                platform="sensor",
-                value_template="{{ value_json.clean_time_min }}",
-                unit_of_measurement="min",
-                device_class="duration",
-                state_class="measurement",
-                icon="mdi:timer-outline",
-                entity_category="diagnostic",
-            ),
-            "last_clean_area": entity(
-                "last_clean_area",
-                "Last clean area",
-                domain="sensor",
-                platform="sensor",
-                value_template="{{ value_json.clean_area_m2 }}",
-                unit_of_measurement="m²",
-                state_class="measurement",
-                icon="mdi:texture-box",
-                entity_category="diagnostic",
-            ),
             "delete_unnamed_maps": entity(
                 "delete_unnamed_maps",
                 "Delete unnamed maps",
@@ -359,14 +377,128 @@ def discovery_payload(cfg: Config, topics: Topics, entries: list[MapEntry], seri
                 icon="mdi:map-minus",
                 entity_category="config",
             ),
+            **info_components(topics, entity),
         },
     }
 
 
+def info_components(topics: Topics, entity) -> dict:
+    """Components fed from the slow ``info`` topic: consumables, history, dock."""
+    info = {"state_topic": topics.info}
+
+    def sensor(key: str, name: str, field: str, **extra) -> dict:
+        return entity(key, name, domain="sensor", platform="sensor",
+                      value_template=f"{{{{ value_json.{field} }}}}", **info, **extra)
+
+    comps: dict = {}
+    # Consumables: hours left + reset buttons
+    for key, name, icon in (
+        ("main_brush", "Main brush", "mdi:brush"),
+        ("side_brush", "Side brush", "mdi:brush-variant"),
+        ("filter", "Filter", "mdi:air-filter"),
+        ("sensor", "Sensors", "mdi:eye-outline"),
+    ):
+        comps[f"{key}_left"] = sensor(
+            f"{key}_left", f"{name} left", f"{key}_left_h",
+            unit_of_measurement="h", device_class="duration", state_class="measurement",
+            icon=icon, entity_category="diagnostic",
+        )
+        comps[f"reset_{key}"] = entity(
+            f"reset_{key}", f"Reset {name.lower()}", domain="button", platform="button",
+            command_topic=topics.consumable_reset, payload_press=key,
+            icon="mdi:restart", entity_category="config",
+        )
+    # Last clean
+    comps["last_clean_start"] = sensor("last_clean_start", "Last clean start", "last_clean_start",
+                                       device_class="timestamp", icon="mdi:clock-start")
+    comps["last_clean_duration"] = sensor("last_clean_duration", "Last clean duration", "last_clean_duration_min",
+                                          unit_of_measurement="min", device_class="duration",
+                                          state_class="measurement", icon="mdi:timer-outline")
+    comps["last_clean_area"] = sensor("last_clean_area", "Last clean area", "last_clean_area_m2",
+                                      unit_of_measurement="m²", state_class="measurement", icon="mdi:texture-box")
+    comps["last_clean_complete"] = entity(
+        "last_clean_complete", "Last clean completed", domain="binary_sensor", platform="binary_sensor",
+        value_template="{{ 'ON' if value_json.last_clean_complete else 'OFF' }}", icon="mdi:check-circle-outline", **info,
+    )
+    comps["last_clean_finish_reason"] = sensor("last_clean_finish_reason", "Last clean finish reason",
+                                               "last_clean_finish_reason", icon="mdi:flag-checkered",
+                                               entity_category="diagnostic")
+    comps["last_clean_type"] = sensor("last_clean_type", "Last clean type", "last_clean_type",
+                                      icon="mdi:broom", entity_category="diagnostic")
+    # Lifetime
+    comps["total_clean_count"] = sensor("total_clean_count", "Total cleans", "total_clean_count",
+                                        state_class="total_increasing", icon="mdi:counter")
+    comps["total_clean_time"] = sensor("total_clean_time", "Total clean time", "total_clean_time_h",
+                                       unit_of_measurement="h", device_class="duration",
+                                       state_class="total_increasing", icon="mdi:timer-sand")
+    comps["total_clean_area"] = sensor("total_clean_area", "Total clean area", "total_clean_area_m2",
+                                       unit_of_measurement="m²", state_class="total_increasing", icon="mdi:texture-box")
+    comps["dust_collection_count"] = sensor("dust_collection_count", "Bin empties", "dust_collection_count",
+                                            state_class="total_increasing", icon="mdi:delete-empty")
+    # Dock settings (read-only)
+    comps["dust_collection_mode"] = sensor("dust_collection_mode", "Dust collection mode", "dust_collection_mode",
+                                           icon="mdi:delete-sweep", entity_category="diagnostic")
+    comps["mop_wash_mode"] = sensor("mop_wash_mode", "Mop wash mode", "mop_wash_mode",
+                                    icon="mdi:water-sync", entity_category="diagnostic")
+    comps["mop_wash_interval"] = sensor("mop_wash_interval", "Mop wash interval", "mop_wash_interval_min",
+                                        unit_of_measurement="min", device_class="duration",
+                                        icon="mdi:timer-sync-outline", entity_category="diagnostic")
+    comps["smart_mop_wash"] = sensor("smart_mop_wash", "Smart mop wash", "smart_mop_wash",
+                                     icon="mdi:auto-mode", entity_category="diagnostic")
+    return comps
+
+
+def _hours(seconds) -> float | None:
+    return round(seconds / 3600, 1) if seconds is not None else None
+
+
+def info_payload(consumable: Consumable, summary: CleanSummary, record: CleanRecord | None, dock: dict) -> dict:
+    dust = dock.get("dust_collection") or {}
+    wash = dock.get("wash_towel") or {}
+    smart = dock.get("smart_wash") or {}
+    dust_code = dust.get("mode")
+    try:
+        dust_name = RoborockDockDustCollectionModeCode(dust_code).name if dust_code is not None else None
+    except ValueError:
+        dust_name = f"code {dust_code}"
+    wash_code = wash.get("wash_mode")
+    return {
+        "main_brush_left_h": _hours(consumable.main_brush_time_left),
+        "side_brush_left_h": _hours(consumable.side_brush_time_left),
+        "filter_left_h": _hours(consumable.filter_time_left),
+        "sensor_left_h": _hours(consumable.sensor_time_left),
+        "main_brush_used_h": _hours(consumable.main_brush_work_time),
+        "side_brush_used_h": _hours(consumable.side_brush_work_time),
+        "filter_used_h": _hours(consumable.filter_work_time),
+        "sensor_used_h": _hours(consumable.sensor_dirty_time),
+        "total_clean_count": summary.clean_count,
+        "total_clean_time_h": _hours(summary.clean_time),
+        "total_clean_area_m2": round(summary.clean_area / 1_000_000, 1) if summary.clean_area is not None else None,
+        "dust_collection_count": summary.dust_collection_count,
+        "last_clean_start": record.begin_datetime.isoformat() if record and record.begin_datetime else None,
+        "last_clean_end": record.end_datetime.isoformat() if record and record.end_datetime else None,
+        "last_clean_duration_min": round(record.duration / 60, 1) if record and record.duration is not None else None,
+        "last_clean_area_m2": record.square_meter_area if record else None,
+        "last_clean_complete": bool(record.complete) if record else None,
+        "last_clean_error": _enum_name(record.error) if record else None,
+        "last_clean_finish_reason": _enum_name(record.finish_reason) if record else None,
+        "last_clean_type": _enum_name(record.clean_type) if record else None,
+        "last_clean_start_type": _enum_name(record.start_type) if record else None,
+        "last_clean_map_flag": record.map_flag if record else None,
+        "dust_collection_mode": dust_name,
+        "mop_wash_mode": WASH_TOWEL_MODES.get(wash_code, f"code {wash_code}") if wash_code is not None else None,
+        "mop_wash_interval_min": round(smart["wash_interval"] / 60) if smart.get("wash_interval") is not None else None,
+        "smart_mop_wash": smart.get("smart_wash"),
+        "updated": datetime.now(UTC).isoformat(timespec="seconds"),
+    }
+
+
 def _enum_name(value) -> str | None:
+    """Enum name without the library's alias suffixes (``finished_cleaning_4`` -> ``finished_cleaning``)."""
     if value is None:
         return None
-    return getattr(value, "name", str(value))
+    name = getattr(value, "name", str(value))
+    return re.sub(r"_\d+$", "", name)
 
 
 def state_payload(status: StatusV2, entries: list[MapEntry]) -> dict:
@@ -414,6 +546,8 @@ class Bridge:
         self.entries: list[MapEntry] = []
         self.serial: str | None = None
         self._maps_refreshed = 0.0
+        self._info_refreshed = 0.0
+        self._was_busy = False
         self._discovery_sent: str | None = None  # JSON of the last payload published
         self._online = False
         self._mqtt = None
@@ -453,13 +587,41 @@ class Bridge:
             self.serial = await self.robot.serial_number()
         await self._publish_discovery()
 
+    async def refresh_info(self, force: bool = False) -> None:
+        if not force and time.monotonic() - self._info_refreshed < INFO_INTERVAL:
+            return
+        consumable = await self.robot.consumables()
+        summary = await self.robot.clean_summary()
+        record = None
+        if summary.records:
+            try:
+                record = await self.robot.clean_record(summary.records[0])
+            except RoborockException as err:
+                _LOGGER.debug("get_clean_record failed: %s", err)
+        dock = await self.robot.dock_settings()
+        await self._publish(self.topics.info, info_payload(consumable, summary, record, dock), retain=True)
+        self._info_refreshed = time.monotonic()
+
     async def poll_once(self) -> StatusV2:
         await self.refresh_maps()
         await self._publish_discovery()  # no-op unless changed or after an MQTT reconnect
         status = await self.robot.status()
         await self._publish(self.topics.state, state_payload(status, self.entries), retain=True)
+        busy = is_busy(status)
+        # A job just ended: the clean record and consumables changed, read them now.
+        await self.refresh_info(force=self._was_busy and not busy)
+        self._was_busy = busy
         await self._set_online(True)
         return status
+
+    async def handle_consumable_reset(self, which: str) -> None:
+        field = CONSUMABLE_RESET_KEYS.get(which.strip())
+        if field is None:
+            _LOGGER.warning("Unknown consumable %r (known: %s)", which, sorted(CONSUMABLE_RESET_KEYS))
+            return
+        result = await self.robot.reset_consumable(field)
+        _LOGGER.info("Reset consumable %s -> %s", field, result)
+        await self.refresh_info(force=True)
 
     async def handle_map_command(self, label: str) -> None:
         label = label.strip()
@@ -551,6 +713,8 @@ class Bridge:
                 handler, what = self.handle_map_command(payload), "Map switch"
             elif message.topic.matches(self.topics.maps_delete_unnamed):
                 handler, what = self.handle_delete_unnamed(), "Map deletion"
+            elif message.topic.matches(self.topics.consumable_reset):
+                handler, what = self.handle_consumable_reset(payload), "Consumable reset"
             else:
                 continue
             try:
@@ -583,6 +747,7 @@ class Bridge:
                     self._discovery_sent = None
                     await mqtt.subscribe(self.topics.map_set)
                     await mqtt.subscribe(self.topics.maps_delete_unnamed)
+                    await mqtt.subscribe(self.topics.consumable_reset)
                     poller = asyncio.create_task(self._poll_loop())
                     try:
                         await self._command_loop(mqtt)
@@ -604,6 +769,12 @@ class Bridge:
         print("# state topic:", self.topics.state)
         print(json.dumps(state_payload(status, self.entries), indent=2))
         print("# busy:", is_busy(status))
+        consumable = await self.robot.consumables()
+        summary = await self.robot.clean_summary()
+        record = await self.robot.clean_record(summary.records[0]) if summary.records else None
+        dock = await self.robot.dock_settings()
+        print("# info topic:", self.topics.info)
+        print(json.dumps(info_payload(consumable, summary, record, dock), indent=2))
         self.robot.close()
 
 

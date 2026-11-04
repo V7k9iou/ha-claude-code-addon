@@ -19,9 +19,11 @@ Entities (one MQTT device):
 | `select.<name>_active_map` | The robot's active saved map. Pick another to switch. Refused while the robot is mid-job. |
 | `sensor.<name>_robot_state` | `charging`, `segment_cleaning`, `washing_the_mop`, … with every raw status field as attributes. |
 | `sensor.<name>_error` | Robot error name (diagnostic). |
-| `sensor.<name>_last_clean_duration` | Minutes (diagnostic). |
-| `sensor.<name>_last_clean_area` | m² (diagnostic). |
 | `button.<name>_delete_unnamed_maps` | Deletes the unnamed maps the robot auto-builds when it loses its position. Never touches a named map or the active map. |
+| `sensor.<name>_{main_brush,side_brush,filter,sensor}_left` | Hours left on each consumable, with a `button.<name>_reset_*` for each (diagnostic/config). |
+| `sensor.<name>_last_clean_{start,duration,area,type,finish_reason}`, `binary_sensor.<name>_last_clean_complete` | The robot's own record of the last job. |
+| `sensor.<name>_total_clean_{count,time,area}`, `sensor.<name>_dust_collection_count` | Lifetime totals. |
+| `sensor.<name>_{dust_collection_mode,mop_wash_mode,mop_wash_interval,smart_mop_wash}` | Dock settings, read-only (diagnostic). |
 
 Everything Matter already does stays on Matter, by design: one control path per
 function.
