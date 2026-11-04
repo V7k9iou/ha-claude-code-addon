@@ -44,11 +44,11 @@ reservation.
 ## Configuration
 
 ```yaml
-robot_ip: 192.168.2.119
-device_id: 2l9VonfaiCBuReGHF8s3I2
+robot_ip: 192.168.1.50
+device_id: "<duid from list-devices>"
 local_key: "<16 chars>"
 device_name: Roborock Saros 20      # device name in HA; entity IDs derive from it
-suggested_area: Big living room     # area HA proposes when the device is first discovered
+suggested_area: Living room         # area HA proposes when the device is first discovered
 poll_interval: 30                   # seconds between status reads
 maps_refresh_interval: 600          # seconds between saved-map list reads
 discovery_prefix: homeassistant
