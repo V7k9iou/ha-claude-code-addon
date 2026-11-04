@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.1 — fix image build
+
+- The image build failed on HA OS with `musl-1.2.5-r23 breaks musl-dev-1.2.5-r24`:
+  Alpine's `musl-dev` had moved ahead of the musl pinned in the base image.
+  The compiler was only a safety net; every dependency ships a prebuilt Alpine
+  wheel, so the build deps are gone and pip now runs with `--only-binary=:all:`.
+
 ## 0.1.0 — initial release
 
 - Local-only bridge for a Matter-paired Roborock: active-map `select`, robot

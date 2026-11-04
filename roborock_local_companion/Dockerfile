@@ -8,16 +8,17 @@ ENV LANG=C.UTF-8 \
 
 COPY requirements.txt /tmp/requirements.txt
 
-# Python runtime in a venv. Every compiled dependency (aiohttp, pycryptodome,
-# Pillow via the map parser) ships musllinux wheels for Alpine, so the build
-# deps are only a safety net and are removed again.
+# Python runtime in a venv. The whole dependency tree (20 packages, incl.
+# aiohttp, pycryptodome and Pillow) ships musllinux wheels for Alpine on
+# aarch64 and amd64, so no compiler is installed: --only-binary makes pip fail
+# loudly instead of trying to build if that ever changes. (Installing gcc /
+# musl-dev used to be a "safety net" and broke the build when Alpine's musl-dev
+# moved ahead of the base image's pinned musl.)
 # hadolint ignore=DL3018
 RUN apk add --no-cache python3 py3-pip \
-    && apk add --no-cache --virtual .build-deps gcc musl-dev python3-dev \
     && python3 -m venv /opt/venv \
     && /opt/venv/bin/pip install --no-cache-dir --upgrade pip \
-    && /opt/venv/bin/pip install --no-cache-dir -r /tmp/requirements.txt \
-    && apk del .build-deps \
+    && /opt/venv/bin/pip install --no-cache-dir --only-binary=:all: -r /tmp/requirements.txt \
     && rm -rf /tmp/requirements.txt /root/.cache
 
 COPY rootfs /
