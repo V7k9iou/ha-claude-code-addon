@@ -1,5 +1,5 @@
 name: Roborock Local Companion
-version: "0.1.0"
+version: "0.1.1"
 slug: roborock_local_companion
 description: Local-only companion for a Matter-paired Roborock. Switch saved maps and read robot status over the LAN; exposed to Home Assistant via MQTT discovery.
 url: "https://github.com/talcum/ha-claude-code-addon"
