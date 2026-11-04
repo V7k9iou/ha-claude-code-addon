@@ -14,6 +14,8 @@ Entities created (all under one MQTT device):
   sensor  Error                -- robot error name (diagnostic)
   sensor  Last clean duration  -- minutes (diagnostic)
   sensor  Last clean area      -- m2 (diagnostic)
+  button  Delete unnamed maps  -- removes auto-built maps that have no name;
+                                  never the active map, never a named one
 
 Everything else (start/stop/dock/segments/clean mode) deliberately stays on
 Matter, so there is one control path per function and no second source of
@@ -206,6 +208,9 @@ class Robot:
     async def load_map(self, flag: int):
         return await self.rpc("load_multi_map", [flag])
 
+    async def delete_map(self, flag: int):
+        return await self.rpc("del_map", [flag])
+
     async def serial_number(self) -> str | None:
         try:
             data = self._first(await self.rpc("get_serial_number"))
@@ -255,6 +260,7 @@ class Topics:
         self.availability = f"{base}/availability"
         self.state = f"{base}/state"
         self.map_set = f"{base}/map/set"
+        self.maps_delete_unnamed = f"{base}/maps/delete_unnamed"
         self.discovery = f"{cfg.discovery_prefix}/device/roborock_local_{cfg.duid}/config"
 
 
@@ -342,6 +348,16 @@ def discovery_payload(cfg: Config, topics: Topics, entries: list[MapEntry], seri
                 state_class="measurement",
                 icon="mdi:texture-box",
                 entity_category="diagnostic",
+            ),
+            "delete_unnamed_maps": entity(
+                "delete_unnamed_maps",
+                "Delete unnamed maps",
+                domain="button",
+                platform="button",
+                command_topic=topics.maps_delete_unnamed,
+                payload_press="PRESS",
+                icon="mdi:map-minus",
+                entity_category="config",
             ),
         },
     }
@@ -475,6 +491,36 @@ class Bridge:
         else:
             _LOGGER.info("Now on map %r", label)
 
+    async def handle_delete_unnamed(self) -> None:
+        """Delete every saved map that has no name, except the active one.
+
+        A Roborock that loses its position builds a fresh, unnamed map. Those are
+        the only maps this ever touches: named maps are the user's, and the
+        active map is never deleted even if unnamed (switch away first).
+        """
+        status = await self.robot.status()
+        if is_busy(status):
+            _LOGGER.warning(
+                "Refusing to delete maps: robot is busy (state=%s, in_cleaning=%s). Dock it first.",
+                _enum_name(status.state),
+                status.in_cleaning,
+            )
+            return
+        maps = await self.robot.maps()
+        unnamed = [m for m in maps.map_info or [] if not (m.name or "").strip()]
+        skipped = [m.map_flag for m in unnamed if m.map_flag == status.current_map]
+        targets = [m.map_flag for m in unnamed if m.map_flag != status.current_map]
+        if skipped:
+            _LOGGER.warning("Not deleting unnamed map %s: it is the active map. Switch away first.", skipped[0])
+        if not targets:
+            _LOGGER.info("No unnamed maps to delete (maps: %s)", [e.label for e in map_entries(maps)])
+            return
+        for flag in targets:
+            result = await self.robot.delete_map(flag)
+            _LOGGER.info("Deleted unnamed map %s -> %s", flag, result)
+        await self.refresh_maps(force=True)
+        await self.poll_once()
+
     # -- loops ----------------------------------------------------------------
 
     async def _poll_loop(self) -> None:
@@ -500,17 +546,22 @@ class Bridge:
 
     async def _command_loop(self, mqtt) -> None:
         async for message in mqtt.messages:
+            payload = bytes(message.payload).decode(errors="replace")
             if message.topic.matches(self.topics.map_set):
-                payload = bytes(message.payload).decode(errors="replace")
-                try:
-                    await self.handle_map_command(payload)
-                except RoborockException as err:
-                    _LOGGER.warning("Map switch failed: %s", err)
-                    await self._set_online(False)
-                    self.robot.close()
-                    self._wake.set()  # let the poll loop reconnect promptly
-                except Exception:  # noqa: BLE001
-                    _LOGGER.exception("Unexpected error handling map command")
+                handler, what = self.handle_map_command(payload), "Map switch"
+            elif message.topic.matches(self.topics.maps_delete_unnamed):
+                handler, what = self.handle_delete_unnamed(), "Map deletion"
+            else:
+                continue
+            try:
+                await handler
+            except RoborockException as err:
+                _LOGGER.warning("%s failed: %s", what, err)
+                await self._set_online(False)
+                self.robot.close()
+                self._wake.set()  # let the poll loop reconnect promptly
+            except Exception:  # noqa: BLE001
+                _LOGGER.exception("Unexpected error during %s", what.lower())
 
     async def run(self) -> None:
         import aiomqtt  # imported here so --dry-run works without a broker
@@ -531,6 +582,7 @@ class Bridge:
                     self._online = False
                     self._discovery_sent = None
                     await mqtt.subscribe(self.topics.map_set)
+                    await mqtt.subscribe(self.topics.maps_delete_unnamed)
                     poller = asyncio.create_task(self._poll_loop())
                     try:
                         await self._command_loop(mqtt)

@@ -21,6 +21,7 @@ Entities (one MQTT device):
 | `sensor.<name>_error` | Robot error name (diagnostic). |
 | `sensor.<name>_last_clean_duration` | Minutes (diagnostic). |
 | `sensor.<name>_last_clean_area` | m² (diagnostic). |
+| `button.<name>_delete_unnamed_maps` | Deletes the unnamed maps the robot auto-builds when it loses its position. Never touches a named map or the active map. |
 
 Everything Matter already does stays on Matter, by design: one control path per
 function.

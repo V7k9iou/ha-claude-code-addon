@@ -2,8 +2,9 @@
 
 ## What it does, and does not do
 
-- **Does:** switch the robot's active saved map, and report robot state over
-  the LAN. Exposed as a `select` and a few `sensor`s via MQTT discovery.
+- **Does:** switch the robot's active saved map, delete the unnamed maps the
+  robot auto-builds when it gets lost, and report robot state over the LAN.
+  Exposed as a `select`, a `button` and a few `sensor`s via MQTT discovery.
 - **Does not:** start, stop, dock, pick rooms or set clean modes. Those stay on
   the Matter integration so there is exactly one control path per function.
 - **Never contacts the Roborock cloud.** The only credential it needs is the
@@ -82,6 +83,12 @@ log_level: info
 - The device is marked unavailable when the robot cannot be reached; the
   bridge reconnects with backoff.
 - Maps with an empty name (freshly auto-built ones) show as `Map <n>`.
+- **Delete unnamed maps** (`button`): a confused robot builds a new, unnamed
+  map instead of relocalising. Pressing the button deletes every saved map
+  whose name is empty, except the active one (switch away first). Named maps
+  are never touched. Refused while the robot is busy. The map list and the
+  select's options refresh right after. This is a tidy-up, not a cure: keep the
+  robot on the right map and start it from the dock to avoid new ones.
 
 ## Example: refuse the nightly clean on the wrong map
 
