@@ -1,0 +1,54 @@
+name: Roborock Local Companion
+version: "0.1.0"
+slug: roborock_local_companion
+description: Local-only companion for a Matter-paired Roborock. Switch saved maps and read robot status over the LAN; exposed to Home Assistant via MQTT discovery.
+url: "https://github.com/talcum/ha-claude-code-addon"
+arch:
+  - aarch64
+  - amd64
+
+# s6-overlay v3 must be PID 1
+init: false
+
+startup: services
+boot: auto
+stage: experimental
+
+# Broker credentials come from the Supervisor's MQTT service (Mosquitto add-on)
+# unless mqtt_host is set explicitly in the options.
+services:
+  - mqtt:need
+
+host_network: false
+apparmor: false
+backup: hot
+
+options:
+  robot_ip: ""
+  device_id: ""
+  local_key: ""
+  device_name: "Roborock vacuum"
+  suggested_area: ""
+  poll_interval: 30
+  maps_refresh_interval: 600
+  discovery_prefix: homeassistant
+  mqtt_host: ""
+  mqtt_port: 1883
+  mqtt_username: ""
+  mqtt_password: ""
+  log_level: info
+
+schema:
+  robot_ip: str
+  device_id: str
+  local_key: password
+  device_name: str
+  suggested_area: str?
+  poll_interval: int(10,600)
+  maps_refresh_interval: int(60,86400)
+  discovery_prefix: str
+  mqtt_host: str?
+  mqtt_port: port?
+  mqtt_username: str?
+  mqtt_password: password?
+  log_level: list(debug|info|warning|error)?

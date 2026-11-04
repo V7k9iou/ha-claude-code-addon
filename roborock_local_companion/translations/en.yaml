@@ -1,0 +1,36 @@
+configuration:
+  robot_ip:
+    name: Robot IP address
+    description: LAN IP of the Roborock robot (give it a DHCP reservation).
+  device_id:
+    name: Device ID (duid)
+    description: Roborock device identifier, from the one-time python-roborock login.
+  local_key:
+    name: Local key
+    description: The robot's static local encryption key, from the one-time python-roborock login. Treat as a secret.
+  device_name:
+    name: Device name
+    description: Name of the device in Home Assistant. Entity IDs are derived from it.
+  suggested_area:
+    name: Suggested area
+    description: Area Home Assistant assigns to the device on first discovery (optional).
+  poll_interval:
+    name: Poll interval (s)
+    description: How often the robot status is read.
+  maps_refresh_interval:
+    name: Map list refresh (s)
+    description: How often the saved-map list is re-read.
+  discovery_prefix:
+    name: MQTT discovery prefix
+    description: Must match the MQTT integration's discovery prefix (default homeassistant).
+  mqtt_host:
+    name: MQTT host (override)
+    description: Leave empty to use the Mosquitto add-on via the Supervisor.
+  mqtt_port:
+    name: MQTT port (override)
+  mqtt_username:
+    name: MQTT username (override)
+  mqtt_password:
+    name: MQTT password (override)
+  log_level:
+    name: Log level
