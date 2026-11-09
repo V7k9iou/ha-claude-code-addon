@@ -63,7 +63,13 @@ from roborock.roborock_message import RoborockMessageProtocol
 
 _LOGGER = logging.getLogger("companion")
 
-RPC_TIMEOUT = 10.0
+RPC_TIMEOUT = 6.0  # per attempt; the robot normally answers in well under a second
+# The robot ends each local session ~270 s after it connects (measured on a
+# Saros 20, keep-alive pings or not). Sometimes it closes cleanly; sometimes it
+# just stops answering, and a command sent then hangs until RPC_TIMEOUT. So the
+# bridge opens a fresh session before the robot drops the old one, and retries
+# a timed-out request once on a fresh session.
+SESSION_MAX_AGE = 200.0  # < 270 s minus one 30 s poll interval, with margin
 ROBOT_RECONNECT_MIN = 5.0
 ROBOT_RECONNECT_MAX = 300.0
 MQTT_RECONNECT = 10.0
@@ -190,6 +196,10 @@ def slugify(text: str) -> str:
 # ----------------------------------------------------------------------------
 
 
+class RobotError(RoborockException):
+    """The robot answered with an error: a real refusal, not a lost message."""
+
+
 class Robot:
     """Owns the single local connection to the robot and serialises RPCs."""
 
@@ -198,6 +208,7 @@ class Robot:
         self._duid = duid
         self._local_key = local_key
         self._channel: LocalChannel | None = None
+        self._connected_at = 0.0
         self._lock = asyncio.Lock()
 
     @property
@@ -205,55 +216,76 @@ class Robot:
         return self._channel is not None and self._channel.is_connected
 
     async def connect(self) -> None:
-        if self.connected:
-            return
+        recycle = self.connected
+        if recycle:
+            if time.monotonic() - self._connected_at < SESSION_MAX_AGE:
+                return
+            _LOGGER.debug("Recycling the robot session before the robot drops it")
         self.close()
         channel = LocalChannel(self._ip, self._local_key, self._duid)
         await channel.connect()
         self._channel = channel
-        _LOGGER.info("Connected to %s:58867 (local protocol %s)", self._ip, channel.protocol_version.value)
+        self._connected_at = time.monotonic()
+        (_LOGGER.debug if recycle else _LOGGER.info)(
+            "Connected to %s:58867 (local protocol %s)", self._ip, channel.protocol_version.value
+        )
 
     def close(self) -> None:
         if self._channel is not None:
             try:
-                self._channel.close()
+                # The library warns when closing a session the robot already
+                # ended; there is nothing to close then.
+                if self._channel.is_connected:
+                    self._channel.close()
             except Exception:  # noqa: BLE001 - closing a dead transport must never raise
                 pass
             self._channel = None
 
-    async def rpc(self, method: str, params=None):
+    async def rpc(self, method: str, params=None, retry: bool = True):
+        """One request/response. A timeout or a dead session gets one retry on a
+        fresh session (``retry=False`` for requests that must not run twice).
+        An error reply from the robot is never retried."""
         async with self._lock:
-            await self.connect()
-            channel = self._channel
-            assert channel is not None
-            request = RequestMessage(method, params=params)
-            message = request.encode_message(
-                RoborockMessageProtocol.GENERAL_REQUEST, version=channel.protocol_version
-            )
-            future: asyncio.Future = asyncio.get_running_loop().create_future()
-
-            def on_message(incoming) -> None:
-                try:
-                    decoded = decode_rpc_response(incoming)
-                except RoborockException:
-                    return  # keep-alive / hello traffic
-                if decoded.request_id == request.request_id and not future.done():
-                    if decoded.api_error:
-                        future.set_exception(decoded.api_error)
-                    else:
-                        future.set_result(decoded.data)
-
-            unsub = await channel.subscribe(on_message)
             try:
-                await channel.publish(message)
-                return await asyncio.wait_for(future, RPC_TIMEOUT)
-            except TimeoutError as err:
-                # A silent robot usually means the TCP session is stale; force a
-                # fresh connection on the next call.
+                return await self._rpc_once(method, params)
+            except RoborockException as err:
+                if not retry or isinstance(err, RobotError):
+                    raise
+                _LOGGER.info("%s: %s; retrying on a fresh session", method, err)
                 self.close()
-                raise RoborockException(f"{method}: no reply within {RPC_TIMEOUT:.0f}s") from err
-            finally:
-                unsub()
+                return await self._rpc_once(method, params)
+
+    async def _rpc_once(self, method: str, params):
+        await self.connect()
+        channel = self._channel
+        assert channel is not None
+        request = RequestMessage(method, params=params)
+        message = request.encode_message(
+            RoborockMessageProtocol.GENERAL_REQUEST, version=channel.protocol_version
+        )
+        future: asyncio.Future = asyncio.get_running_loop().create_future()
+
+        def on_message(incoming) -> None:
+            try:
+                decoded = decode_rpc_response(incoming)
+            except RoborockException:
+                return  # keep-alive / hello traffic
+            if decoded.request_id == request.request_id and not future.done():
+                if decoded.api_error:
+                    future.set_exception(RobotError(f"{method}: {decoded.api_error}"))
+                else:
+                    future.set_result(decoded.data)
+
+        unsub = await channel.subscribe(on_message)
+        try:
+            await channel.publish(message)
+            return await asyncio.wait_for(future, RPC_TIMEOUT)
+        except TimeoutError as err:
+            # A silent robot means the session is stale; never reuse it.
+            self.close()
+            raise RoborockException(f"{method}: no reply within {RPC_TIMEOUT:.0f}s") from err
+        finally:
+            unsub()
 
     @staticmethod
     def _first(data):
@@ -269,7 +301,7 @@ class Robot:
         return await self.rpc("load_multi_map", [flag])
 
     async def delete_map(self, flag: int):
-        return await self.rpc("del_map", [flag])
+        return await self.rpc("del_map", [flag], retry=False)
 
     async def consumables(self) -> Consumable:
         return Consumable.from_dict(self._first(await self.rpc("get_consumable")))
@@ -1285,9 +1317,9 @@ class Bridge:
             except RoborockException as err:
                 _LOGGER.warning("%s failed: %s", what, err)
                 await self._report(f"failed: {what.lower()}: {err}", False)
-                await self._set_online(False)
-                self.robot.close()
-                self._wake.set()  # let the poll loop reconnect promptly
+                # Availability is the poll loop's call: one failed command (after
+                # its retry) must not grey out every entity. Poll now instead.
+                self._wake.set()
             except Exception:  # noqa: BLE001
                 _LOGGER.exception("Unexpected error during %s", what.lower())
 
