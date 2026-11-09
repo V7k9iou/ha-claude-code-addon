@@ -1,5 +1,5 @@
 name: Roborock Local Companion
-version: "0.1.1"
+version: "0.2.0"
 slug: roborock_local_companion
 description: Local-only control for a Roborock over the LAN - vacuum entity with room cleaning, per-room settings, map switching, status - exposed to Home Assistant via MQTT discovery.
 url: "https://github.com/talcum/ha-claude-code-addon"
