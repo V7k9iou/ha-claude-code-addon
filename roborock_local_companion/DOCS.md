@@ -128,9 +128,17 @@ from it, and re-read after every change.
 
 ## Behaviour
 
-- Switching the map is **refused while the robot is busy** (cleaning, docking,
-  washing the mop, …). The select snaps back to the real value and the add-on
-  log says why. Dock the robot first.
+- Switching the map is **refused while the robot is busy** (cleaning, driving
+  back to the dock, docking, washing the mop, …). The select snaps back to the
+  real value and `sensor.<name>_last_command` says why.
+- A **return trip left paused** (pressing the home button again while the
+  robot drives back pauses it) keeps `in_returning` set, and the robot rejects
+  every map switch with `-10007 invalid status` until that trip is cancelled.
+  The add-on cancels such a paused return (a Stop) and then switches. It only
+  does this when the robot is standing still with no job in progress; a robot
+  that is still driving home is refused instead.
+- If the robot still answers `-10007`, the switch is refused with a hint to
+  press Stop on the vacuum and pick the map again.
 - The robot's `map_status` is the source of truth; the select is re-read after
   every switch. Matter's `SupportedAreas` attribute does **not** tell you the
   active map (it can list every map's rooms at once), so don't infer from it.

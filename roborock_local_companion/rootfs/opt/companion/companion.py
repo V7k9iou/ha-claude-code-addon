@@ -18,7 +18,8 @@ Entities created (all under one MQTT device):
           for every room. Stored ON THE ROBOT (its per-room "customize"
           settings, the ones the Roborock app edits); the robot is the source
           of truth and is re-read after every write.
-  select  Active map           -- pick a saved map; refused while the robot is busy
+  select  Active map           -- pick a saved map; refused while the robot is busy,
+                                  a return trip left paused is cancelled first
   sensor  Robot state          -- charging / segment_cleaning / ... with all raw
                                   status fields as attributes
   sensor  Error                -- robot error name (diagnostic)
@@ -74,6 +75,10 @@ ROBOT_RECONNECT_MIN = 5.0
 ROBOT_RECONNECT_MAX = 300.0
 MQTT_RECONNECT = 10.0
 SWITCH_SETTLE = 3.0
+STOP_SETTLE = 6.0  # max wait for app_stop to clear in_returning (took ~5 s on a Saros 20)
+# V1 error reply "invalid status": the robot has locked the action. Seen on
+# load_multi_map while a return trip was left paused (in_returning=1).
+INVALID_STATUS = -10007
 INFO_INTERVAL = 300.0  # consumables / history / dock settings refresh (also right after a job ends)
 FAST_POLL = 5.0  # status poll period right after a command, so HA sees the job start promptly
 FAST_POLL_FOR = 180.0
@@ -199,6 +204,10 @@ def slugify(text: str) -> str:
 class RobotError(RoborockException):
     """The robot answered with an error: a real refusal, not a lost message."""
 
+    def __init__(self, message: str, code: int | None = None) -> None:
+        super().__init__(message)
+        self.code = code
+
 
 class Robot:
     """Owns the single local connection to the robot and serialises RPCs."""
@@ -272,7 +281,9 @@ class Robot:
                 return  # keep-alive / hello traffic
             if decoded.request_id == request.request_id and not future.done():
                 if decoded.api_error:
-                    future.set_exception(RobotError(f"{method}: {decoded.api_error}"))
+                    error = decoded.api_error
+                    code = error.get("code") if isinstance(error, dict) else None
+                    future.set_exception(RobotError(f"{method}: {error}", code if isinstance(code, int) else None))
                 else:
                     future.set_result(decoded.data)
 
@@ -1211,25 +1222,58 @@ class Bridge:
         if status.current_map == entry.flag:
             _LOGGER.info("Already on map %r", label)
             return
-        if is_busy(status):
-            _LOGGER.warning(
-                "Refusing to switch to %r: robot is busy (state=%s, in_cleaning=%s). Dock it first.",
-                label,
-                _enum_name(status.state),
-                status.in_cleaning,
-            )
+        try:
+            if is_busy(status):
+                raise Refused(
+                    f"refused map switch to {label}: robot is busy ({_enum_name(status.state)},"
+                    f" in_cleaning={status.in_cleaning}, in_returning={status.in_returning});"
+                    " let it dock or stop it first"
+                )
+            if status.in_returning:
+                # Not moving, but a return trip is still pending (e.g. the home
+                # button pressed again mid-return pauses it). The robot locks map
+                # switching until that trip is cancelled. Nothing is in motion,
+                # so cancelling it is safe.
+                status = await self._cancel_paused_return()
+            _LOGGER.info("Switching to map %r (flag %s)", label, entry.flag)
+            try:
+                result = await self.robot.load_map(entry.flag)
+            except RobotError as err:
+                if err.code != INVALID_STATUS:
+                    raise
+                raise Refused(
+                    f"refused map switch to {label}: the robot locked it ({INVALID_STATUS} invalid status,"
+                    f" state={_enum_name(status.state)}). It is probably holding an unfinished job:"
+                    " press Stop on the vacuum, then pick the map again"
+                ) from err
+        except Refused:
             # Re-publish the real state so the select snaps back in HA.
             await self._publish(self.topics.state, state_payload(status, self.entries), retain=True)
-            return
-        _LOGGER.info("Switching to map %r (flag %s)", label, entry.flag)
-        result = await self.robot.load_map(entry.flag)
+            raise
         _LOGGER.debug("load_multi_map -> %s", result)
         await asyncio.sleep(SWITCH_SETTLE)
         status = await self.poll_once()
         if status.current_map != entry.flag:
-            _LOGGER.warning("Robot still reports map %s after switch to %s", status.current_map, entry.flag)
-        else:
-            _LOGGER.info("Now on map %r", label)
+            raise Refused(f"failed: map switch to {label}: robot still reports map {status.current_map}")
+        await self._report(f"ok: map switched to {label}", True)
+
+    async def _cancel_paused_return(self) -> StatusV2:
+        """Stop a return trip that is pending but not moving, and wait for the
+        robot to drop ``in_returning``. Returns the new status."""
+        _LOGGER.info("A paused return trip is blocking the map switch; cancelling it")
+        await self.robot.rpc("app_stop")
+        deadline = time.monotonic() + STOP_SETTLE
+        while True:
+            await asyncio.sleep(1.0)
+            status = await self.robot.status()
+            if not status.in_returning:
+                await self._report("ok: cancelled a paused return trip to unlock the map switch", True)
+                return status
+            if time.monotonic() >= deadline:
+                raise Refused(
+                    "refused map switch: the robot still has a return trip pending after Stop;"
+                    " dock it, then pick the map again"
+                )
 
     async def handle_delete_unnamed(self) -> None:
         """Delete every saved map that has no name, except the active one.

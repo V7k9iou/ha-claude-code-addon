@@ -16,7 +16,7 @@ Entities (one MQTT device):
 | `vacuum.<name>` | Start / pause / stop / dock / locate / suction. Room cleaning through HA's area picker (`vacuum.clean_area`): each room is cleaned with its own per-room settings. `vacuum.send_command` `clean_rooms` cleans named rooms with one explicit mode. |
 | `select.<name>_<room>_{mode,suction,water,route}`, `number.<name>_<room>_passes` | The robot's own per-room settings for one map (default "Main floor"). Unavailable while the robot is on another map. |
 | `sensor.<name>_battery`, `sensor.<name>_last_command` | Battery; the result of the last command, including why one was refused. |
-| `select.<name>_active_map` | The robot's active saved map. Pick another to switch. Refused while the robot is mid-job. |
+| `select.<name>_active_map` | The robot's active saved map. Pick another to switch. Refused while the robot is mid-job; a paused return trip is cancelled first. |
 | `sensor.<name>_robot_state` | `charging`, `segment_cleaning`, `washing_the_mop`, … with every raw status field as attributes. |
 | `sensor.<name>_error` | Robot error name (diagnostic). |
 | `button.<name>_delete_unnamed_maps` | Deletes the unnamed maps the robot auto-builds when it loses its position. Never touches a named map or the active map. |
