@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.2.2 — map switching after a paused return trip
+
+- Pressing the robot's home button again while it drives back pauses the
+  return trip, and the robot then rejects every map switch with
+  `-10007 invalid status`. The add-on now cancels such a paused return
+  (Stop) and switches. A robot that is still moving or mid-job is refused,
+  never stopped.
+- Map switch refusals and results are reported in the Last command sensor,
+  with a plain hint instead of the raw `-10007` error.
+
+## 0.2.1 — no more "unavailable" blips
+
+- The robot ends each local session about 270 s after it connects, and
+  sometimes stops answering instead of closing. A command sent then failed
+  after 10 s and greyed out every entity. The add-on now opens a fresh
+  session every 200 s, retries a timed-out request once on a fresh session,
+  and no longer marks the device offline because one command failed.
+
 ## 0.2.0 — local control: vacuum entity, room cleaning, per-room settings
 
 - New `vacuum.<name>` entity, fully local: start / pause / stop / dock /

@@ -18,7 +18,8 @@ Entities created (all under one MQTT device):
           for every room. Stored ON THE ROBOT (its per-room "customize"
           settings, the ones the Roborock app edits); the robot is the source
           of truth and is re-read after every write.
-  select  Active map           -- pick a saved map; refused while the robot is busy
+  select  Active map           -- pick a saved map; refused while the robot is busy,
+                                  a return trip left paused is cancelled first
   sensor  Robot state          -- charging / segment_cleaning / ... with all raw
                                   status fields as attributes
   sensor  Error                -- robot error name (diagnostic)
@@ -63,11 +64,21 @@ from roborock.roborock_message import RoborockMessageProtocol
 
 _LOGGER = logging.getLogger("companion")
 
-RPC_TIMEOUT = 10.0
+RPC_TIMEOUT = 6.0  # per attempt; the robot normally answers in well under a second
+# The robot ends each local session ~270 s after it connects (measured on a
+# Saros 20, keep-alive pings or not). Sometimes it closes cleanly; sometimes it
+# just stops answering, and a command sent then hangs until RPC_TIMEOUT. So the
+# bridge opens a fresh session before the robot drops the old one, and retries
+# a timed-out request once on a fresh session.
+SESSION_MAX_AGE = 200.0  # < 270 s minus one 30 s poll interval, with margin
 ROBOT_RECONNECT_MIN = 5.0
 ROBOT_RECONNECT_MAX = 300.0
 MQTT_RECONNECT = 10.0
 SWITCH_SETTLE = 3.0
+STOP_SETTLE = 6.0  # max wait for app_stop to clear in_returning (took ~5 s on a Saros 20)
+# V1 error reply "invalid status": the robot has locked the action. Seen on
+# load_multi_map while a return trip was left paused (in_returning=1).
+INVALID_STATUS = -10007
 INFO_INTERVAL = 300.0  # consumables / history / dock settings refresh (also right after a job ends)
 FAST_POLL = 5.0  # status poll period right after a command, so HA sees the job start promptly
 FAST_POLL_FOR = 180.0
@@ -190,6 +201,14 @@ def slugify(text: str) -> str:
 # ----------------------------------------------------------------------------
 
 
+class RobotError(RoborockException):
+    """The robot answered with an error: a real refusal, not a lost message."""
+
+    def __init__(self, message: str, code: int | None = None) -> None:
+        super().__init__(message)
+        self.code = code
+
+
 class Robot:
     """Owns the single local connection to the robot and serialises RPCs."""
 
@@ -198,6 +217,7 @@ class Robot:
         self._duid = duid
         self._local_key = local_key
         self._channel: LocalChannel | None = None
+        self._connected_at = 0.0
         self._lock = asyncio.Lock()
 
     @property
@@ -205,55 +225,78 @@ class Robot:
         return self._channel is not None and self._channel.is_connected
 
     async def connect(self) -> None:
-        if self.connected:
-            return
+        recycle = self.connected
+        if recycle:
+            if time.monotonic() - self._connected_at < SESSION_MAX_AGE:
+                return
+            _LOGGER.debug("Recycling the robot session before the robot drops it")
         self.close()
         channel = LocalChannel(self._ip, self._local_key, self._duid)
         await channel.connect()
         self._channel = channel
-        _LOGGER.info("Connected to %s:58867 (local protocol %s)", self._ip, channel.protocol_version.value)
+        self._connected_at = time.monotonic()
+        (_LOGGER.debug if recycle else _LOGGER.info)(
+            "Connected to %s:58867 (local protocol %s)", self._ip, channel.protocol_version.value
+        )
 
     def close(self) -> None:
         if self._channel is not None:
             try:
-                self._channel.close()
+                # The library warns when closing a session the robot already
+                # ended; there is nothing to close then.
+                if self._channel.is_connected:
+                    self._channel.close()
             except Exception:  # noqa: BLE001 - closing a dead transport must never raise
                 pass
             self._channel = None
 
-    async def rpc(self, method: str, params=None):
+    async def rpc(self, method: str, params=None, retry: bool = True):
+        """One request/response. A timeout or a dead session gets one retry on a
+        fresh session (``retry=False`` for requests that must not run twice).
+        An error reply from the robot is never retried."""
         async with self._lock:
-            await self.connect()
-            channel = self._channel
-            assert channel is not None
-            request = RequestMessage(method, params=params)
-            message = request.encode_message(
-                RoborockMessageProtocol.GENERAL_REQUEST, version=channel.protocol_version
-            )
-            future: asyncio.Future = asyncio.get_running_loop().create_future()
-
-            def on_message(incoming) -> None:
-                try:
-                    decoded = decode_rpc_response(incoming)
-                except RoborockException:
-                    return  # keep-alive / hello traffic
-                if decoded.request_id == request.request_id and not future.done():
-                    if decoded.api_error:
-                        future.set_exception(decoded.api_error)
-                    else:
-                        future.set_result(decoded.data)
-
-            unsub = await channel.subscribe(on_message)
             try:
-                await channel.publish(message)
-                return await asyncio.wait_for(future, RPC_TIMEOUT)
-            except TimeoutError as err:
-                # A silent robot usually means the TCP session is stale; force a
-                # fresh connection on the next call.
+                return await self._rpc_once(method, params)
+            except RoborockException as err:
+                if not retry or isinstance(err, RobotError):
+                    raise
+                _LOGGER.info("%s: %s; retrying on a fresh session", method, err)
                 self.close()
-                raise RoborockException(f"{method}: no reply within {RPC_TIMEOUT:.0f}s") from err
-            finally:
-                unsub()
+                return await self._rpc_once(method, params)
+
+    async def _rpc_once(self, method: str, params):
+        await self.connect()
+        channel = self._channel
+        assert channel is not None
+        request = RequestMessage(method, params=params)
+        message = request.encode_message(
+            RoborockMessageProtocol.GENERAL_REQUEST, version=channel.protocol_version
+        )
+        future: asyncio.Future = asyncio.get_running_loop().create_future()
+
+        def on_message(incoming) -> None:
+            try:
+                decoded = decode_rpc_response(incoming)
+            except RoborockException:
+                return  # keep-alive / hello traffic
+            if decoded.request_id == request.request_id and not future.done():
+                if decoded.api_error:
+                    error = decoded.api_error
+                    code = error.get("code") if isinstance(error, dict) else None
+                    future.set_exception(RobotError(f"{method}: {error}", code if isinstance(code, int) else None))
+                else:
+                    future.set_result(decoded.data)
+
+        unsub = await channel.subscribe(on_message)
+        try:
+            await channel.publish(message)
+            return await asyncio.wait_for(future, RPC_TIMEOUT)
+        except TimeoutError as err:
+            # A silent robot means the session is stale; never reuse it.
+            self.close()
+            raise RoborockException(f"{method}: no reply within {RPC_TIMEOUT:.0f}s") from err
+        finally:
+            unsub()
 
     @staticmethod
     def _first(data):
@@ -269,7 +312,7 @@ class Robot:
         return await self.rpc("load_multi_map", [flag])
 
     async def delete_map(self, flag: int):
-        return await self.rpc("del_map", [flag])
+        return await self.rpc("del_map", [flag], retry=False)
 
     async def consumables(self) -> Consumable:
         return Consumable.from_dict(self._first(await self.rpc("get_consumable")))
@@ -1179,25 +1222,58 @@ class Bridge:
         if status.current_map == entry.flag:
             _LOGGER.info("Already on map %r", label)
             return
-        if is_busy(status):
-            _LOGGER.warning(
-                "Refusing to switch to %r: robot is busy (state=%s, in_cleaning=%s). Dock it first.",
-                label,
-                _enum_name(status.state),
-                status.in_cleaning,
-            )
+        try:
+            if is_busy(status):
+                raise Refused(
+                    f"refused map switch to {label}: robot is busy ({_enum_name(status.state)},"
+                    f" in_cleaning={status.in_cleaning}, in_returning={status.in_returning});"
+                    " let it dock or stop it first"
+                )
+            if status.in_returning:
+                # Not moving, but a return trip is still pending (e.g. the home
+                # button pressed again mid-return pauses it). The robot locks map
+                # switching until that trip is cancelled. Nothing is in motion,
+                # so cancelling it is safe.
+                status = await self._cancel_paused_return()
+            _LOGGER.info("Switching to map %r (flag %s)", label, entry.flag)
+            try:
+                result = await self.robot.load_map(entry.flag)
+            except RobotError as err:
+                if err.code != INVALID_STATUS:
+                    raise
+                raise Refused(
+                    f"refused map switch to {label}: the robot locked it ({INVALID_STATUS} invalid status,"
+                    f" state={_enum_name(status.state)}). It is probably holding an unfinished job:"
+                    " press Stop on the vacuum, then pick the map again"
+                ) from err
+        except Refused:
             # Re-publish the real state so the select snaps back in HA.
             await self._publish(self.topics.state, state_payload(status, self.entries), retain=True)
-            return
-        _LOGGER.info("Switching to map %r (flag %s)", label, entry.flag)
-        result = await self.robot.load_map(entry.flag)
+            raise
         _LOGGER.debug("load_multi_map -> %s", result)
         await asyncio.sleep(SWITCH_SETTLE)
         status = await self.poll_once()
         if status.current_map != entry.flag:
-            _LOGGER.warning("Robot still reports map %s after switch to %s", status.current_map, entry.flag)
-        else:
-            _LOGGER.info("Now on map %r", label)
+            raise Refused(f"failed: map switch to {label}: robot still reports map {status.current_map}")
+        await self._report(f"ok: map switched to {label}", True)
+
+    async def _cancel_paused_return(self) -> StatusV2:
+        """Stop a return trip that is pending but not moving, and wait for the
+        robot to drop ``in_returning``. Returns the new status."""
+        _LOGGER.info("A paused return trip is blocking the map switch; cancelling it")
+        await self.robot.rpc("app_stop")
+        deadline = time.monotonic() + STOP_SETTLE
+        while True:
+            await asyncio.sleep(1.0)
+            status = await self.robot.status()
+            if not status.in_returning:
+                await self._report("ok: cancelled a paused return trip to unlock the map switch", True)
+                return status
+            if time.monotonic() >= deadline:
+                raise Refused(
+                    "refused map switch: the robot still has a return trip pending after Stop;"
+                    " dock it, then pick the map again"
+                )
 
     async def handle_delete_unnamed(self) -> None:
         """Delete every saved map that has no name, except the active one.
@@ -1285,9 +1361,9 @@ class Bridge:
             except RoborockException as err:
                 _LOGGER.warning("%s failed: %s", what, err)
                 await self._report(f"failed: {what.lower()}: {err}", False)
-                await self._set_online(False)
-                self.robot.close()
-                self._wake.set()  # let the poll loop reconnect promptly
+                # Availability is the poll loop's call: one failed command (after
+                # its retry) must not grey out every entity. Poll now instead.
+                self._wake.set()
             except Exception:  # noqa: BLE001
                 _LOGGER.exception("Unexpected error during %s", what.lower())
 
