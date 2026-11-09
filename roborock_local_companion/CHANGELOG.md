@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.2.0 — local control: vacuum entity, room cleaning, per-room settings
+
+- New `vacuum.<name>` entity, fully local: start / pause / stop / dock /
+  locate / suction, and room cleaning through HA's area picker
+  (`vacuum.clean_area`). Each room is cleaned with its own per-room settings.
+  Segment ids are `<map_flag>_<segment>`; map them to your areas once.
+- `vacuum.send_command` `clean_rooms`: clean named rooms with one explicit
+  suction / water / route / passes (for scripts).
+- Per-room Mode / Suction / Water flow / Mop route / Passes controls for the
+  rooms of one map (new option `room_settings_map`, default `Main floor`),
+  stored on the robot itself and re-read after every change.
+- `Battery` and `Last command` sensors; commands that can't be carried out
+  (robot busy, room not on the active map, unknown room) are refused and
+  reported instead of being sent.
+- Status is polled every 5 s for 3 minutes after a command and every 10 s
+  while a job runs.
+
 ## 0.1.1 — fix image build
 
 - The image build failed on HA OS with `musl-1.2.5-r23 breaks musl-dev-1.2.5-r24`:
