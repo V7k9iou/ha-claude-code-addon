@@ -1,13 +1,23 @@
 #!/opt/venv/bin/python
 """Roborock Local Companion.
 
-Bridges the few things the Matter integration cannot do for a Roborock robot
--- above all switching the active saved map -- into Home Assistant, using
-ONLY the robot's LAN protocol (TCP 58867) on the robot side and MQTT discovery
-on the Home Assistant side. No Roborock cloud, no account token: the robot's
-static ``local_key`` is all it needs.
+Controls a Roborock robot from Home Assistant using ONLY the robot's LAN
+protocol (TCP 58867) on the robot side and MQTT discovery on the Home
+Assistant side. No Roborock cloud, no account token: the robot's static
+``local_key`` is all it needs.
 
 Entities created (all under one MQTT device):
+  vacuum  Vacuum               -- start / pause / stop / dock / locate / suction,
+                                  plus room cleaning: HA's area picker sends
+                                  segments, each cleaned with its own per-room
+                                  settings; ``send_command clean_rooms`` cleans
+                                  named rooms with one explicit mode (scripts)
+  sensor  Battery, Last command
+  per-room settings (one map, default "Main floor")
+          Mode / Suction / Water flow / Mop route selects and a Passes number
+          for every room. Stored ON THE ROBOT (its per-room "customize"
+          settings, the ones the Roborock app edits); the robot is the source
+          of truth and is re-read after every write.
   select  Active map           -- pick a saved map; refused while the robot is busy
   sensor  Robot state          -- charging / segment_cleaning / ... with all raw
                                   status fields as attributes
@@ -21,9 +31,10 @@ Entities created (all under one MQTT device):
   sensors Dock settings        -- dust-collection mode, mop wash mode and
                                   interval (read-only)
 
-Everything else (start/stop/dock/segments/clean mode) deliberately stays on
-Matter, so there is one control path per function and no second source of
-truth.
+Segment ids are published as ``<map_flag>_<segment>``: segment numbers restart
+on every map, so the map flag keeps them unique, and the list stays stable
+when the active map changes. Segments that are not on the active map are
+refused rather than sent (the robot would match nothing and wander).
 
 Configuration is by environment variables (set by the s6 ``run`` script from
 the add-on options). ``--dry-run`` connects to the robot, prints the discovery
@@ -58,6 +69,9 @@ ROBOT_RECONNECT_MAX = 300.0
 MQTT_RECONNECT = 10.0
 SWITCH_SETTLE = 3.0
 INFO_INTERVAL = 300.0  # consumables / history / dock settings refresh (also right after a job ends)
+FAST_POLL = 5.0  # status poll period right after a command, so HA sees the job start promptly
+FAST_POLL_FOR = 180.0
+BUSY_POLL = 10.0  # status poll period while a job runs
 
 CONSUMABLE_RESET_KEYS = {
     "main_brush": "main_brush_work_time",
@@ -66,6 +80,36 @@ CONSUMABLE_RESET_KEYS = {
     "sensor": "sensor_dirty_time",
 }
 WASH_TOWEL_MODES = {0: "light", 1: "balanced", 2: "deep"}
+
+# Per-room / per-job cleaning settings. Labels are what HA shows; scripts may
+# also pass the normalised form ("max_plus", "deep_plus", "high").
+SUCTION = {"Off": 105, "Quiet": 101, "Balanced": 102, "Turbo": 103, "Max": 104, "Max+": 108}
+WATER = {"Off": 200, "Slight": 221, "Low": 225, "Gentle": 230, "Medium": 235,
+         "Moderate": 240, "High": 245, "Extreme": 250}
+ROUTE = {"Standard": 300, "Deep": 301, "Deep+": 303, "Fast": 304}
+MODES = ("Vacuum & mop", "Vacuum only", "Mop only")
+# Water-slider firmware stores the slider position (1-30) as 220 + position;
+# the app groups positions into named ranges, keyed by their last position.
+WATER_SLIDE_RANGES = ((3, "Slight"), (7, "Low"), (12, "Gentle"), (17, "Medium"),
+                      (22, "Moderate"), (27, "High"), (30, "Extreme"))
+WATER_LEGACY = {201: "Low", 202: "Medium", 203: "High"}
+# "Custom" = use each room's own settings (fan / water / route codes).
+CUSTOM_FAN, CUSTOM_WATER, CUSTOM_ROUTE = 106, 204, 302
+DEFAULT_SUCTION, DEFAULT_WATER, DEFAULT_ROUTE = 102, 235, 300
+FAN_SPEEDS = {"off": 105, "quiet": 101, "balanced": 102, "turbo": 103, "max": 104,
+              "max_plus": 108, "custom": CUSTOM_FAN}
+
+# HA vacuum states for each RoborockStateCode. Dock-side states (charging,
+# emptying, washing the mop) read "cleaning" while a job is still in progress.
+VACUUM_DOCK_STATES = {8, 14, 22, 23, 25, 100, 202, 6310}
+VACUUM_STATES = {
+    1: "cleaning", 4: "cleaning", 5: "cleaning", 7: "cleaning", 11: "cleaning",
+    16: "cleaning", 17: "cleaning", 18: "cleaning", 26: "cleaning", 29: "cleaning",
+    6: "returning", 15: "returning",
+    10: "paused",
+    9: "error", 12: "error",
+    2: "idle", 3: "idle", 13: "idle",
+}
 
 # RoborockStateCode values during which a map switch would interrupt a job.
 BUSY_STATES = {
@@ -108,6 +152,7 @@ class Config:
     mqtt_username: str
     mqtt_password: str
     addon_version: str
+    room_settings_map: str
 
     @classmethod
     def from_env(cls) -> Config:
@@ -131,6 +176,7 @@ class Config:
             mqtt_username=os.environ.get("MQTT_USERNAME", ""),
             mqtt_password=os.environ.get("MQTT_PASSWORD", ""),
             addon_version=os.environ.get("ADDON_VERSION", "dev"),
+            room_settings_map=os.environ.get("ROOM_SETTINGS_MAP", "Main floor").strip() or "Main floor",
         )
 
 
@@ -258,6 +304,23 @@ class Robot:
             return None
         return data.get("serial_number") if isinstance(data, dict) else None
 
+    async def customize(self) -> list[dict]:
+        """The robot's per-room settings for the active map (rooms never edited are absent)."""
+        data = await self.rpc("get_customize_clean_mode")
+        return [d for d in data if isinstance(d, dict)] if isinstance(data, list) else []
+
+    async def set_customize(self, entries: list[dict]):
+        # Replaces the WHOLE list: any room left out loses its saved settings.
+        return await self.rpc("set_customize_clean_mode", entries)
+
+    async def set_job_mode(self, fan: int, water: int, route: int) -> None:
+        await self.rpc("set_custom_mode", [fan])
+        await self.rpc("set_water_box_custom_mode", [water])
+        await self.rpc("set_mop_mode", [route])
+
+    async def segment_clean(self, segments: list[int], repeat: int = 1):
+        return await self.rpc("app_segment_clean", [{"segments": segments, "repeat": repeat}])
+
 
 # ----------------------------------------------------------------------------
 # Map bookkeeping
@@ -265,10 +328,17 @@ class Robot:
 
 
 @dataclass(frozen=True)
+class Room:
+    segment: int
+    name: str
+    slug: str
+
+
+@dataclass(frozen=True)
 class MapEntry:
     flag: int
     label: str
-    rooms: int
+    rooms: tuple[Room, ...]
 
 
 def map_entries(maps: MultiMapsList) -> list[MapEntry]:
@@ -284,8 +354,158 @@ def map_entries(maps: MultiMapsList) -> list[MapEntry]:
         if label in seen:
             label = f"{label} ({info.map_flag})"
         seen[label] = info.map_flag
-        entries.append(MapEntry(flag=info.map_flag, label=label, rooms=len(info.rooms or [])))
+        entries.append(MapEntry(flag=info.map_flag, label=label, rooms=map_rooms(info.rooms or [])))
     return entries
+
+
+def map_rooms(rooms) -> tuple[Room, ...]:
+    out: list[Room] = []
+    slugs: set[str] = set()
+    for room in sorted((r for r in rooms if r.id is not None), key=lambda r: r.id):
+        name = (room.iot_name or "").strip() or f"Room {room.id}"
+        slug = slugify(name)
+        if slug in slugs:
+            slug = f"{slug}_{room.id}"
+        slugs.add(slug)
+        out.append(Room(segment=room.id, name=name, slug=slug))
+    return tuple(out)
+
+
+def segment_id(flag: int, segment: int) -> str:
+    return f"{flag}_{segment}"
+
+
+def find_entry(entries: list[MapEntry], label: str) -> MapEntry | None:
+    wanted = label.strip().casefold()
+    return next((e for e in entries if e.label.casefold() == wanted), None)
+
+
+# ----------------------------------------------------------------------------
+# Cleaning settings
+# ----------------------------------------------------------------------------
+
+
+def _norm(text) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", str(text).strip().lower().replace("+", "_plus")).strip("_")
+
+
+def lookup(table: dict[str, int], value) -> int:
+    """Label or normalised name -> robot code, e.g. ``"Max+"`` or ``"max_plus"`` -> 108."""
+    for label, code in table.items():
+        if _norm(label) == _norm(value):
+            return code
+    raise ValueError(f"{value!r} is not one of {', '.join(table)}")
+
+
+def suction_label(code) -> str | None:
+    return next((label for label, c in SUCTION.items() if c == code), None)
+
+
+def route_label(code) -> str | None:
+    return next((label for label, c in ROUTE.items() if c == code), None)
+
+
+def water_label(code) -> str | None:
+    if code == WATER["Off"]:
+        return "Off"
+    if code in WATER_LEGACY:
+        return WATER_LEGACY[code]
+    if isinstance(code, int) and 221 <= code <= 250:
+        position = code - 220
+        return next(label for last, label in WATER_SLIDE_RANGES if position <= last)
+    return None
+
+
+def mode_label(fan, water) -> str | None:
+    if fan is None or water is None:
+        return None
+    if fan == SUCTION["Off"]:
+        return "Mop only"
+    if water == WATER["Off"]:
+        return "Vacuum only"
+    return "Vacuum & mop"
+
+
+def room_view(entry: dict | None) -> dict:
+    """What HA shows for one room. Rooms never edited have no entry -> all unknown."""
+    if entry is None:
+        return {"mode": None, "suction": None, "water": None, "route": None, "passes": None}
+    fan, water = entry.get("fan_power"), entry.get("water_box_mode")
+    return {
+        "mode": mode_label(fan, water),
+        "suction": suction_label(fan),
+        "water": water_label(water),
+        "route": route_label(entry.get("mop_mode")),
+        "passes": entry.get("repeat"),
+    }
+
+
+def apply_room_setting(entry: dict, field: str, value: str, remembered: dict) -> dict:
+    """Return a copy of one room's customize entry with ``field`` changed.
+
+    ``remembered`` holds the last non-off suction/water for the room, so that
+    switching "Vacuum only" back to "Vacuum & mop" restores what was there.
+    Raises ValueError on a bad value or a combination the robot can't do.
+    """
+    new = dict(entry)
+    fan_off, water_off = SUCTION["Off"], WATER["Off"]
+    if field == "suction":
+        new["fan_power"] = lookup(SUCTION, value)
+    elif field == "water":
+        new["water_box_mode"] = lookup(WATER, value)
+    elif field == "route":
+        new["mop_mode"] = lookup(ROUTE, value)
+    elif field == "passes":
+        passes = int(float(value))
+        if not 1 <= passes <= 3:
+            raise ValueError(f"passes must be 1-3, got {value!r}")
+        new["repeat"] = passes
+    elif field == "mode":
+        mode = next((m for m in MODES if _norm(m) == _norm(value)), None)
+        if mode is None:
+            raise ValueError(f"{value!r} is not one of {', '.join(MODES)}")
+        restore_fan = remembered.get("fan_power", DEFAULT_SUCTION)
+        restore_water = remembered.get("water_box_mode", DEFAULT_WATER)
+        if mode == "Vacuum only":
+            new["water_box_mode"] = water_off
+            if new["fan_power"] == fan_off:
+                new["fan_power"] = restore_fan
+        elif mode == "Mop only":
+            new["fan_power"] = fan_off
+            if new["water_box_mode"] == water_off:
+                new["water_box_mode"] = restore_water
+        else:
+            if new["fan_power"] == fan_off:
+                new["fan_power"] = restore_fan
+            if new["water_box_mode"] == water_off:
+                new["water_box_mode"] = restore_water
+    else:
+        raise ValueError(f"unknown setting {field!r}")
+    if new["fan_power"] == fan_off and new["water_box_mode"] == water_off:
+        raise ValueError("suction and water can't both be Off")
+    return new
+
+
+def new_customize_entry(segment: int) -> dict:
+    return {"segment": segment, "fan_power": DEFAULT_SUCTION, "water_box_mode": DEFAULT_WATER,
+            "mop_mode": DEFAULT_ROUTE, "repeat": 1, "seq_type": 0}
+
+
+def vacuum_state(status: StatusV2) -> str:
+    code = int(status.state) if status.state is not None else None
+    if code in VACUUM_DOCK_STATES:
+        return "cleaning" if status.in_cleaning else "docked"
+    if code in VACUUM_STATES:
+        return VACUUM_STATES[code]
+    if code is not None and 6301 <= code <= 6309:
+        return "cleaning"
+    if status.in_cleaning:
+        return "cleaning"
+    return "docked" if status.charge_status else "idle"
+
+
+def fan_speed_name(code) -> str | None:
+    return next((name for name, c in FAN_SPEEDS.items() if c == code), None)
 
 
 # ----------------------------------------------------------------------------
@@ -296,24 +516,39 @@ def map_entries(maps: MultiMapsList) -> list[MapEntry]:
 class Topics:
     def __init__(self, cfg: Config) -> None:
         base = f"roborock_local/{cfg.duid}"
+        self.base = base
         self.availability = f"{base}/availability"
         self.state = f"{base}/state"
         self.map_set = f"{base}/map/set"
         self.maps_delete_unnamed = f"{base}/maps/delete_unnamed"
         self.info = f"{base}/info"
         self.consumable_reset = f"{base}/consumable/reset"
+        self.vacuum_state = f"{base}/vacuum/state"
+        self.vacuum_command = f"{base}/vacuum/command"
+        self.vacuum_fan_speed = f"{base}/vacuum/fan_speed/set"
+        self.vacuum_send_command = f"{base}/vacuum/send_command"
+        self.vacuum_clean_segments = f"{base}/vacuum/clean_segments"
+        self.rooms = f"{base}/rooms"
+        self.room_set = f"{base}/room/+/+/set"
+        self.last_command = f"{base}/last_command"
         self.discovery = f"{cfg.discovery_prefix}/device/roborock_local_{cfg.duid}/config"
+
+    def room_setting(self, segment: int, field: str) -> str:
+        return f"{self.base}/room/{segment}/{field}/set"
 
 
 def discovery_payload(cfg: Config, topics: Topics, entries: list[MapEntry], serial: str | None) -> dict:
     uid = f"roborock_local_{cfg.duid}"
     prefix = slugify(cfg.device_name)
 
-    def entity(key: str, name: str, **extra) -> dict:
+    def entity(key: str, name: str | None, object_id: str | None = None, **extra) -> dict:
+        if "availability" not in extra:
+            extra["availability_topic"] = topics.availability
+        suffix = key if object_id is None else object_id  # "" = the device slug alone
         return {
             "name": name,
             "unique_id": f"{uid}_{key}",
-            "default_entity_id": f"{extra.pop('domain')}.{prefix}_{key}",
+            "default_entity_id": f"{extra.pop('domain')}.{prefix}{'_' + suffix if suffix else ''}",
             **extra,
         }
 
@@ -335,10 +570,45 @@ def discovery_payload(cfg: Config, topics: Topics, entries: list[MapEntry], seri
             "sw_version": cfg.addon_version,
             "support_url": "https://github.com/talcum/ha-claude-code-addon",
         },
-        "availability_topic": topics.availability,
         "state_topic": topics.state,
         "qos": 0,
         "components": {
+            "vacuum": entity(
+                "vacuum",
+                None,
+                object_id="",
+                domain="vacuum",
+                platform="vacuum",
+                state_topic=topics.vacuum_state,
+                command_topic=topics.vacuum_command,
+                set_fan_speed_topic=topics.vacuum_fan_speed,
+                fan_speed_list=list(FAN_SPEEDS),
+                send_command_topic=topics.vacuum_send_command,
+                clean_segments_command_topic=topics.vacuum_clean_segments,
+                supported_features=["start", "pause", "stop", "return_home", "status", "locate",
+                                    "fan_speed", "send_command"],
+            ),
+            "battery": entity(
+                "battery",
+                "Battery",
+                domain="sensor",
+                platform="sensor",
+                value_template="{{ value_json.battery }}",
+                unit_of_measurement="%",
+                device_class="battery",
+                state_class="measurement",
+            ),
+            "last_command": entity(
+                "last_command",
+                "Last command",
+                domain="sensor",
+                platform="sensor",
+                state_topic=topics.last_command,
+                value_template="{{ value_json.result[:255] }}",
+                json_attributes_topic=topics.last_command,
+                icon="mdi:console-line",
+                entity_category="diagnostic",
+            ),
             "active_map": entity(
                 "active_map",
                 "Active map",
@@ -378,8 +648,49 @@ def discovery_payload(cfg: Config, topics: Topics, entries: list[MapEntry], seri
                 entity_category="config",
             ),
             **info_components(topics, entity),
+            **room_components(topics, entity, find_entry(entries, cfg.room_settings_map)),
         },
     }
+
+
+def room_components(topics: Topics, entity, settings_map: MapEntry | None) -> dict:
+    """Mode / suction / water / route / passes for every room of the settings map.
+
+    Unique ids carry the map flag and segment number, entity ids the robot's
+    room name. Unavailable while the robot is on another map, because segment
+    numbers restart per map and a write would land on the wrong room.
+    """
+    if settings_map is None:
+        return {}
+    availability = [
+        {"topic": topics.availability},
+        {"topic": topics.rooms, "value_template": "{{ 'online' if value_json.available else 'offline' }}"},
+    ]
+    comps: dict = {}
+    for room in settings_map.rooms:
+        key = f"room_{settings_map.flag}_{room.segment}"
+        value = f"(value_json.rooms['{room.segment}'] or {{}})"
+        common = {"availability": availability, "availability_mode": "all", "state_topic": topics.rooms}
+        for field, label, options, icon in (
+            ("mode", "mode", list(MODES), "mdi:robot-vacuum-variant"),
+            ("suction", "suction", list(SUCTION), "mdi:fan"),
+            ("water", "water flow", list(WATER), "mdi:water"),
+            ("route", "mop route", list(ROUTE), "mdi:map-marker-path"),
+        ):
+            comps[f"{key}_{field}"] = entity(
+                f"{key}_{field}", f"{room.name} {label}", object_id=f"{room.slug}_{field}",
+                domain="select", platform="select", **common,
+                options=options, command_topic=topics.room_setting(room.segment, field),
+                value_template=f"{{{{ {value}.{field} }}}}", icon=icon,
+            )
+        comps[f"{key}_passes"] = entity(
+            f"{key}_passes", f"{room.name} passes", object_id=f"{room.slug}_passes",
+            domain="number", platform="number", **common,
+            min=1, max=3, step=1, mode="box",
+            command_topic=topics.room_setting(room.segment, "passes"),
+            value_template=f"{{{{ {value}.passes }}}}", icon="mdi:repeat",
+        )
+    return comps
 
 
 def info_components(topics: Topics, entity) -> dict:
@@ -533,6 +844,29 @@ def is_busy(status: StatusV2) -> bool:
     return bool(status.in_cleaning) or code in BUSY_STATES
 
 
+def vacuum_payload(status: StatusV2, entries: list[MapEntry]) -> dict:
+    return {
+        "state": vacuum_state(status),
+        "fan_speed": fan_speed_name(status.fan_power),
+        "segments": {segment_id(e.flag, r.segment): r.name for e in entries for r in e.rooms},
+    }
+
+
+def rooms_payload(settings_map: MapEntry | None, customize: list[dict] | None, available: bool) -> dict:
+    by_segment = {c.get("segment"): c for c in customize or []}
+    rooms = settings_map.rooms if settings_map else ()
+    return {
+        "available": available,
+        "map": settings_map.label if settings_map else None,
+        "rooms": {str(r.segment): {"name": r.name, **room_view(by_segment.get(r.segment))} for r in rooms},
+        "updated": datetime.now(UTC).isoformat(timespec="seconds"),
+    }
+
+
+class Refused(Exception):
+    """A command the bridge declined to send; the message goes to Last command."""
+
+
 # ----------------------------------------------------------------------------
 # Bridge
 # ----------------------------------------------------------------------------
@@ -552,6 +886,15 @@ class Bridge:
         self._online = False
         self._mqtt = None
         self._wake = asyncio.Event()
+        self._fast_until = 0.0
+        self.customize: list[dict] | None = None  # robot's per-room settings, last read
+        self._rooms_flag: int | None = None  # map the per-room settings were read on
+        self._rooms_refreshed = 0.0
+        self._remembered: dict[int, dict] = {}  # last non-off suction / water per segment
+
+    @property
+    def settings_map(self) -> MapEntry | None:
+        return find_entry(self.entries, self.cfg.room_settings_map)
 
     # -- publishing helpers ---------------------------------------------------
 
@@ -607,12 +950,215 @@ class Bridge:
         await self._publish_discovery()  # no-op unless changed or after an MQTT reconnect
         status = await self.robot.status()
         await self._publish(self.topics.state, state_payload(status, self.entries), retain=True)
+        await self._publish(self.topics.vacuum_state, vacuum_payload(status, self.entries), retain=True)
         busy = is_busy(status)
         # A job just ended: the clean record and consumables changed, read them now.
         await self.refresh_info(force=self._was_busy and not busy)
+        await self.refresh_rooms(status)
         self._was_busy = busy
         await self._set_online(True)
         return status
+
+    async def refresh_rooms(self, status: StatusV2, force: bool = False) -> None:
+        """Re-read the robot's per-room settings while it is on the settings map.
+
+        Off that map the controls are published unavailable: segment numbers
+        restart per map, so the robot's list would belong to other rooms.
+        """
+        settings_map = self.settings_map
+        on_map = settings_map is not None and status.current_map == settings_map.flag
+        due = (force or self._rooms_flag != status.current_map
+               or time.monotonic() - self._rooms_refreshed >= INFO_INTERVAL)
+        if not due:
+            return
+        if on_map:
+            self.customize = await self.robot.customize()
+            for entry in self.customize:
+                remembered = self._remembered.setdefault(entry.get("segment"), {})
+                if entry.get("fan_power") not in (None, SUCTION["Off"]):
+                    remembered["fan_power"] = entry["fan_power"]
+                if entry.get("water_box_mode") not in (None, WATER["Off"]):
+                    remembered["water_box_mode"] = entry["water_box_mode"]
+        self._rooms_refreshed = time.monotonic()
+        self._rooms_flag = status.current_map
+        await self._publish(self.topics.rooms, rooms_payload(settings_map, self.customize, on_map), retain=True)
+
+    async def _report(self, result: str, ok: bool) -> None:
+        (_LOGGER.info if ok else _LOGGER.warning)("Command: %s", result)
+        await self._publish(
+            self.topics.last_command,
+            {"result": result, "ok": ok, "at": datetime.now(UTC).isoformat(timespec="seconds")},
+            retain=True,
+        )
+
+    def _kick(self) -> None:
+        """Poll fast for a while so HA sees the robot react to a command."""
+        self._fast_until = time.monotonic() + FAST_POLL_FOR
+        self._wake.set()
+
+    async def _require_idle(self, what: str) -> StatusV2:
+        status = await self.robot.status()
+        if is_busy(status):
+            raise Refused(
+                f"refused {what}: robot is busy ({_enum_name(status.state)}, in_cleaning={status.in_cleaning});"
+                " stop it or let it dock first"
+            )
+        return status
+
+    def _active_map(self, status: StatusV2) -> MapEntry:
+        entry = next((e for e in self.entries if e.flag == status.current_map), None)
+        if entry is None:
+            raise Refused(f"refused: robot is on unknown map {status.current_map}; refresh maps or switch map")
+        return entry
+
+    # -- vacuum commands ------------------------------------------------------
+
+    VACUUM_COMMANDS = {
+        "start": "app_start",
+        "pause": "app_pause",
+        "stop": "app_stop",
+        "return_to_base": "app_charge",
+        "locate": "find_me",
+    }
+
+    async def handle_vacuum_command(self, payload: str) -> None:
+        method = self.VACUUM_COMMANDS.get(payload.strip())
+        if method is None:
+            raise Refused(f"refused: unknown vacuum command {payload!r}")
+        result = await self.robot.rpc(method)
+        await self._report(f"ok: {payload.strip()} ({method} -> {result})", True)
+        self._kick()
+
+    async def handle_fan_speed(self, payload: str) -> None:
+        name = payload.strip()
+        code = FAN_SPEEDS.get(name)
+        if code is None:
+            raise Refused(f"refused: unknown fan speed {name!r} (known: {', '.join(FAN_SPEEDS)})")
+        if code == CUSTOM_FAN:
+            await self.robot.set_job_mode(CUSTOM_FAN, CUSTOM_WATER, CUSTOM_ROUTE)
+        else:
+            await self.robot.rpc("set_custom_mode", [code])
+        await self._report(f"ok: fan speed {name}", True)
+        self._kick()
+
+    async def handle_clean_segments(self, payload: str) -> None:
+        """HA's area picker: clean these segments, each with its own per-room settings."""
+        try:
+            ids = [str(i) for i in json.loads(payload)]
+        except (ValueError, TypeError) as err:
+            raise Refused(f"refused: bad segment list {payload!r}") from err
+        if not ids:
+            raise Refused("refused: no rooms selected")
+        status = await self._require_idle("room clean")
+        active = self._active_map(status)
+        names = {segment_id(active.flag, r.segment): r for r in active.rooms}
+        off_map = [i for i in ids if i not in names]
+        if off_map:
+            raise Refused(
+                f"refused: {', '.join(off_map)} not on the active map {active.label!r}; switch map first"
+            )
+        rooms = [names[i] for i in ids]
+        await self.robot.set_job_mode(CUSTOM_FAN, CUSTOM_WATER, CUSTOM_ROUTE)
+        result = await self.robot.segment_clean([r.segment for r in rooms])
+        await self._report(f"ok: {', '.join(r.name for r in rooms)} (per-room settings) -> {result}", True)
+        self._kick()
+
+    async def handle_send_command(self, payload: str) -> None:
+        try:
+            message = json.loads(payload)
+        except ValueError:
+            message = {"command": payload.strip()}
+        if not isinstance(message, dict):
+            message = {"command": str(message)}
+        command, params = message.get("command"), message.get("params") or {}
+        if command != "clean_rooms":
+            raise Refused(f"refused: unknown command {command!r} (known: clean_rooms)")
+        await self.clean_rooms(params)
+
+    async def clean_rooms(self, params: dict) -> None:
+        """Clean named rooms with ONE explicit mode, e.g. a script's vacuum or mop phase.
+
+        params: rooms (robot room names, in order), suction (default Balanced),
+        water (default Off), route (default Standard), passes (default 1).
+        """
+        if not isinstance(params, dict):
+            raise Refused(f"refused: clean_rooms params must be a mapping, got {params!r}")
+        wanted = params.get("rooms") or []
+        if isinstance(wanted, str):
+            wanted = [wanted]
+        if not wanted:
+            raise Refused("refused: clean_rooms needs rooms")
+        try:
+            fan = lookup(SUCTION, params.get("suction", "Balanced"))
+            water = lookup(WATER, params.get("water", "Off"))
+            route = lookup(ROUTE, params.get("route", "Standard"))
+            passes = int(params.get("passes", 1))
+        except (ValueError, TypeError) as err:
+            raise Refused(f"refused: {err}") from err
+        if not 1 <= passes <= 3:
+            raise Refused(f"refused: passes must be 1-3, got {passes}")
+        if fan == SUCTION["Off"] and water == WATER["Off"]:
+            raise Refused("refused: suction and water can't both be Off")
+        status = await self._require_idle("room clean")
+        active = self._active_map(status)
+        by_name = {_norm(r.name): r for r in active.rooms} | {r.slug: r for r in active.rooms}
+        unknown = [w for w in wanted if _norm(w) not in by_name]
+        if unknown:
+            raise Refused(
+                f"refused: {', '.join(map(str, unknown))} not on the active map {active.label!r}"
+                f" (rooms: {', '.join(r.name for r in active.rooms)})"
+            )
+        rooms = [by_name[_norm(w)] for w in wanted]
+        await self.robot.set_job_mode(fan, water, route)
+        result = await self.robot.segment_clean([r.segment for r in rooms], passes)
+        mode = f"{suction_label(fan)} / water {water_label(water)} / {route_label(route)} / x{passes}"
+        await self._report(f"ok: {', '.join(r.name for r in rooms)} ({mode}) -> {result}", True)
+        self._kick()
+
+    # -- per-room settings ----------------------------------------------------
+
+    async def handle_room_setting(self, topic: str, payload: str) -> None:
+        # topic: roborock_local/<duid>/room/<segment>/<field>/set
+        *_, segment_text, field, _set = topic.split("/")
+        settings_map = self.settings_map
+        try:
+            segment = int(segment_text)
+            room = next(r for r in settings_map.rooms if r.segment == segment) if settings_map else None
+        except (ValueError, StopIteration):
+            room = None
+        if room is None:
+            raise Refused(f"refused: unknown room segment {segment_text!r}")
+        try:
+            status = await self._require_idle(f"{room.name} {field} change")
+            if status.current_map != settings_map.flag:
+                raise Refused(f"refused: robot is not on {settings_map.label!r}; per-room settings belong to that map")
+            # set_customize_clean_mode REPLACES the whole list, so always start
+            # from a fresh read and write every room back.
+            current = await self.robot.customize()
+            if not current and self.customize:
+                raise Refused("refused: robot returned no per-room settings; not overwriting the saved ones")
+            entries = [dict(e) for e in current]
+            index = next((i for i, e in enumerate(entries) if e.get("segment") == segment), None)
+            base = entries[index] if index is not None else new_customize_entry(segment)
+            try:
+                updated = apply_room_setting(base, field, payload, self._remembered.get(segment, {}))
+            except ValueError as err:
+                raise Refused(f"refused {room.name} {field}: {err}") from err
+            if index is None:
+                entries.append(updated)
+            else:
+                entries[index] = updated
+            result = await self.robot.set_customize(entries)
+            await self.refresh_rooms(await self.robot.status(), force=True)
+            saved = next((e for e in self.customize or [] if e.get("segment") == segment), None)
+            if saved is None or any(saved.get(k) != v for k, v in updated.items()):
+                raise Refused(f"failed: {room.name} {field} -> {payload!r} not saved by the robot ({result})")
+            await self._report(f"ok: {room.name} {field} -> {payload.strip()}", True)
+        except Refused:
+            # Snap the HA control back to what the robot really has.
+            await self._publish(self.topics.rooms, rooms_payload(settings_map, self.customize,
+                                                                 self._rooms_flag == settings_map.flag), retain=True)
+            raise
 
     async def handle_consumable_reset(self, which: str) -> None:
         field = CONSUMABLE_RESET_KEYS.get(which.strip())
@@ -691,7 +1237,12 @@ class Bridge:
             try:
                 await self.poll_once()
                 backoff = ROBOT_RECONNECT_MIN
-                delay = self.cfg.poll_interval
+                if time.monotonic() < self._fast_until:
+                    delay = FAST_POLL
+                elif self._was_busy:
+                    delay = min(BUSY_POLL, self.cfg.poll_interval)
+                else:
+                    delay = self.cfg.poll_interval
             except RoborockException as err:
                 _LOGGER.warning("Robot unreachable: %s (retry in %.0fs)", err, backoff)
                 await self._set_online(False)
@@ -715,12 +1266,25 @@ class Bridge:
                 handler, what = self.handle_delete_unnamed(), "Map deletion"
             elif message.topic.matches(self.topics.consumable_reset):
                 handler, what = self.handle_consumable_reset(payload), "Consumable reset"
+            elif message.topic.matches(self.topics.vacuum_command):
+                handler, what = self.handle_vacuum_command(payload), "Vacuum command"
+            elif message.topic.matches(self.topics.vacuum_fan_speed):
+                handler, what = self.handle_fan_speed(payload), "Fan speed"
+            elif message.topic.matches(self.topics.vacuum_clean_segments):
+                handler, what = self.handle_clean_segments(payload), "Room clean"
+            elif message.topic.matches(self.topics.vacuum_send_command):
+                handler, what = self.handle_send_command(payload), "Send command"
+            elif message.topic.matches(self.topics.room_set):
+                handler, what = self.handle_room_setting(str(message.topic), payload), "Room setting"
             else:
                 continue
             try:
                 await handler
+            except Refused as err:
+                await self._report(str(err), False)
             except RoborockException as err:
                 _LOGGER.warning("%s failed: %s", what, err)
+                await self._report(f"failed: {what.lower()}: {err}", False)
                 await self._set_online(False)
                 self.robot.close()
                 self._wake.set()  # let the poll loop reconnect promptly
@@ -748,6 +1312,10 @@ class Bridge:
                     await mqtt.subscribe(self.topics.map_set)
                     await mqtt.subscribe(self.topics.maps_delete_unnamed)
                     await mqtt.subscribe(self.topics.consumable_reset)
+                    for topic in (self.topics.vacuum_command, self.topics.vacuum_fan_speed,
+                                  self.topics.vacuum_clean_segments, self.topics.vacuum_send_command,
+                                  self.topics.room_set):
+                        await mqtt.subscribe(topic)
                     poller = asyncio.create_task(self._poll_loop())
                     try:
                         await self._command_loop(mqtt)
@@ -769,6 +1337,13 @@ class Bridge:
         print("# state topic:", self.topics.state)
         print(json.dumps(state_payload(status, self.entries), indent=2))
         print("# busy:", is_busy(status))
+        print("# vacuum state topic:", self.topics.vacuum_state)
+        print(json.dumps(vacuum_payload(status, self.entries), indent=2, ensure_ascii=False))
+        settings_map = self.settings_map
+        on_map = settings_map is not None and status.current_map == settings_map.flag
+        customize = await self.robot.customize() if on_map else None
+        print("# rooms topic:", self.topics.rooms)
+        print(json.dumps(rooms_payload(settings_map, customize, on_map), indent=2, ensure_ascii=False))
         consumable = await self.robot.consumables()
         summary = await self.robot.clean_summary()
         record = await self.robot.clean_record(summary.records[0]) if summary.records else None

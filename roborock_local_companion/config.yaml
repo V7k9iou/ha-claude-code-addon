@@ -1,7 +1,7 @@
 name: Roborock Local Companion
 version: "0.1.1"
 slug: roborock_local_companion
-description: Local-only companion for a Matter-paired Roborock. Switch saved maps and read robot status over the LAN; exposed to Home Assistant via MQTT discovery.
+description: Local-only control for a Roborock over the LAN - vacuum entity with room cleaning, per-room settings, map switching, status - exposed to Home Assistant via MQTT discovery.
 url: "https://github.com/talcum/ha-claude-code-addon"
 arch:
   - aarch64
@@ -31,6 +31,7 @@ options:
   suggested_area: ""
   poll_interval: 30
   maps_refresh_interval: 600
+  room_settings_map: "Main floor"
   discovery_prefix: homeassistant
   mqtt_host: ""
   mqtt_port: 1883
@@ -46,6 +47,7 @@ schema:
   suggested_area: str?
   poll_interval: int(10,600)
   maps_refresh_interval: int(60,86400)
+  room_settings_map: str?
   discovery_prefix: str
   mqtt_host: str?
   mqtt_port: port?

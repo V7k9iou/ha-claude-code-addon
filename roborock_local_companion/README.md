@@ -1,13 +1,10 @@
 # Home Assistant Add-on: Roborock Local Companion
 
-Local-only companion for a Roborock vacuum that you control through the
-**Matter** integration. Matter covers starting, stopping, docking, room
-(segment) cleaning and clean modes, but it has no command to switch between
-the robot's saved maps. When the robot ends up on the wrong map, every
-`vacuum.clean_area` call silently matches nothing.
-
-This add-on fills that gap over the robot's own LAN protocol (TCP port 58867)
-and exposes the result to Home Assistant via MQTT discovery. It never talks to
+Local-only control for a Roborock vacuum over the robot's own LAN protocol
+(TCP port 58867), exposed to Home Assistant via MQTT discovery: a full vacuum
+entity with room cleaning through HA's area picker, the robot's per-room
+cleaning settings, map switching (which Matter cannot do), and status,
+consumables and history. It never talks to
 the Roborock cloud and does not need your Roborock account — only the robot's
 static `local_key`, obtained once (see [DOCS.md](./DOCS.md)). It keeps working
 with the robot's internet access blocked.
@@ -16,6 +13,9 @@ Entities (one MQTT device):
 
 | Entity | What it is |
 |---|---|
+| `vacuum.<name>` | Start / pause / stop / dock / locate / suction. Room cleaning through HA's area picker (`vacuum.clean_area`): each room is cleaned with its own per-room settings. `vacuum.send_command` `clean_rooms` cleans named rooms with one explicit mode. |
+| `select.<name>_<room>_{mode,suction,water,route}`, `number.<name>_<room>_passes` | The robot's own per-room settings for one map (default "Main floor"). Unavailable while the robot is on another map. |
+| `sensor.<name>_battery`, `sensor.<name>_last_command` | Battery; the result of the last command, including why one was refused. |
 | `select.<name>_active_map` | The robot's active saved map. Pick another to switch. Refused while the robot is mid-job. |
 | `sensor.<name>_robot_state` | `charging`, `segment_cleaning`, `washing_the_mop`, … with every raw status field as attributes. |
 | `sensor.<name>_error` | Robot error name (diagnostic). |
@@ -25,5 +25,5 @@ Entities (one MQTT device):
 | `sensor.<name>_total_clean_{count,time,area}`, `sensor.<name>_dust_collection_count` | Lifetime totals. |
 | `sensor.<name>_{dust_collection_mode,mop_wash_mode,mop_wash_interval,smart_mop_wash}` | Dock settings, read-only (diagnostic). |
 
-Everything Matter already does stays on Matter, by design: one control path per
-function.
+A Matter pairing of the same robot can stay in place as a fallback; this add-on
+does not need it.
