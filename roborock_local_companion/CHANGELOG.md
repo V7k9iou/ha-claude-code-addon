@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.1 — no more "unavailable" blips
+
+- The robot ends each local session about 270 s after it connects, and
+  sometimes stops answering instead of closing. A command sent then failed
+  after 10 s and greyed out every entity. The add-on now opens a fresh
+  session every 200 s, retries a timed-out request once on a fresh session,
+  and no longer marks the device offline because one command failed.
+
 ## 0.2.0 — local control: vacuum entity, room cleaning, per-room settings
 
 - New `vacuum.<name>` entity, fully local: start / pause / stop / dock /
