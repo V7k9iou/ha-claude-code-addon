@@ -20,6 +20,9 @@ configuration:
   maps_refresh_interval:
     name: Map list refresh (s)
     description: How often the saved-map list is re-read.
+  room_settings_map:
+    name: Map with per-room settings
+    description: Saved map whose rooms get Mode / Suction / Water / Route / Passes controls (default "Main floor").
   discovery_prefix:
     name: MQTT discovery prefix
     description: Must match the MQTT integration's discovery prefix (default homeassistant).

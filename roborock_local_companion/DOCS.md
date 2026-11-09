@@ -2,11 +2,11 @@
 
 ## What it does, and does not do
 
-- **Does:** switch the robot's active saved map, delete the unnamed maps the
-  robot auto-builds when it gets lost, report robot state, consumables, clean
-  history and dock settings over the LAN. Exposed via MQTT discovery.
-- **Does not:** start, stop, dock, pick rooms or set clean modes. Those stay on
-  the Matter integration so there is exactly one control path per function.
+- **Does:** control the robot over the LAN: start / pause / stop / dock /
+  locate, room cleaning, the robot's per-room settings, suction, switching
+  the active saved map, deleting the unnamed maps the robot auto-builds when
+  it gets lost, and robot state, consumables, clean history and dock settings.
+  Exposed via MQTT discovery.
 - **Never contacts the Roborock cloud.** The only credential it needs is the
   robot's `local_key`, which is static for the life of the pairing.
 
@@ -51,6 +51,7 @@ device_name: Roborock Saros 20      # device name in HA; entity IDs derive from 
 suggested_area: Living room         # area HA proposes when the device is first discovered
 poll_interval: 30                   # seconds between status reads
 maps_refresh_interval: 600          # seconds between saved-map list reads
+room_settings_map: Main floor       # map whose rooms get per-room setting controls
 discovery_prefix: homeassistant
 mqtt_host: ""                       # leave empty to use the Supervisor's MQTT service
 mqtt_port: 1883
@@ -68,9 +69,62 @@ log_level: info
 | `suggested_area` | string | Optional. Area HA assigns on first discovery. |
 | `poll_interval` | int 10–600 | Status poll period (s). Default 30. |
 | `maps_refresh_interval` | int 60–86400 | Saved-map list refresh (s). Default 600. |
+| `room_settings_map` | string | Optional. Saved map whose rooms get per-room setting controls. Default `Main floor`. |
 | `discovery_prefix` | string | MQTT discovery prefix. Default `homeassistant`. |
 | `mqtt_host` / `mqtt_port` / `mqtt_username` / `mqtt_password` | optional | Explicit broker. Leave `mqtt_host` empty to use Mosquitto via the Supervisor. |
 | `log_level` | enum | `debug`, `info`, `warning`, `error`. |
+
+## Room cleaning
+
+The vacuum entity publishes every saved map's rooms as segments with ids
+`<map_flag>_<segment>` (e.g. `0_4` = Kitchen on map 0). Segment numbers
+restart on each map, so the map flag keeps them unique. Map the segments to
+your HA areas once (Settings → the vacuum entity → Areas), then:
+
+- **`vacuum.clean_area`** / the area picker in the vacuum's dialog cleans the
+  chosen rooms in the order given, **each with its own per-room settings**
+  (the robot's "custom" mode).
+- **`vacuum.send_command`** `clean_rooms` cleans rooms with **one** mode for
+  the whole job, which suits scripts:
+
+  ```yaml
+  action: vacuum.send_command
+  target:
+    entity_id: vacuum.roborock_saros_20
+  data:
+    command: clean_rooms
+    params:
+      rooms: [Entrance, Hallway, Kitchen]   # the robot's room names
+      suction: balanced    # off | quiet | balanced | turbo | max | max_plus
+      water: "off"         # off | slight | low | gentle | medium | moderate | high | extreme
+      route: standard      # standard | deep | deep_plus | fast
+      passes: 1            # 1-3
+  ```
+
+  Defaults: Balanced, water Off, Standard, 1 pass. Suction and water can't
+  both be off.
+
+Both are **refused** (nothing is sent) when the robot is busy, when a room is
+not on the active map, or when a name is unknown. `sensor.<name>_last_command`
+says which, and why.
+
+## Per-room settings
+
+For every room of `room_settings_map` there are Mode (Vacuum & mop / Vacuum
+only / Mop only), Suction, Water flow, Mop route selects and a Passes number.
+They are the robot's own per-room ("customize") settings, the same ones the
+Roborock app edits, so the robot stays the source of truth: values are read
+from it, and re-read after every change.
+
+- Mode is derived: suction Off = Mop only, water Off = Vacuum only. Going back
+  to Vacuum & mop restores the last suction / water the room had.
+- A room that was never customised shows *unknown* until its first change.
+- Changes are refused while the robot is busy, and the controls are
+  unavailable while the robot is on another map (the segment numbers there
+  belong to other rooms).
+- The robot replaces its whole per-room list on every write. The add-on always
+  re-reads the list and writes every room back, and refuses to write if the
+  robot returns an empty list.
 
 ## Behaviour
 
