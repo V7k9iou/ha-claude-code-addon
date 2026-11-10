@@ -9,6 +9,10 @@
   never stopped.
 - Map switch refusals and results are reported in the Last command sensor,
   with a plain hint instead of the raw `-10007` error.
+- `vacuum.send_command` `clean_rooms` was refused with "clean_rooms needs
+  rooms" whenever it came from HA: HA sends the params at the top level of the
+  message, and the add-on only looked under a `params` key. Both forms are
+  accepted now, so the YAML example in the docs works as written.
 
 ## 0.2.1 — no more "unavailable" blips
 
