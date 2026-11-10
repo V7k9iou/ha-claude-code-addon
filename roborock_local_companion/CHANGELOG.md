@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.0 — clean rooms with their own settings, optionally vacuum only
+
+- `vacuum.send_command` `clean_rooms` takes `room_settings: true` to clean the
+  named rooms, in the order given, with each room's own per-room settings.
+- Add `vacuum_only: true` to keep each room's suction, route and passes with
+  the water off for that one job (Mop only rooms are left out). The add-on
+  swaps water Off into the robot's per-room list for the job and puts the real
+  list back once the robot is idle; the real list is kept in `/data` until
+  then, so a restart mid-job still restores it.
+
 ## 0.2.2 — map switching after a paused return trip
 
 - Pressing the robot's home button again while it drives back pauses the
