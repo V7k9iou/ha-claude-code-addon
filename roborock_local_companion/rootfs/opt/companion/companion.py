@@ -83,6 +83,13 @@ INFO_INTERVAL = 300.0  # consumables / history / dock settings refresh (also rig
 FAST_POLL = 5.0  # status poll period right after a command, so HA sees the job start promptly
 FAST_POLL_FOR = 180.0
 BUSY_POLL = 10.0  # status poll period while a job runs
+# A vacuum-only clean with room settings swaps water Off into the robot's
+# per-room list for the job and keeps the real list here until the job ends,
+# so a restart of the add-on mid-job still puts it back.
+OVERRIDE_FILE = os.path.join(os.environ.get("DATA_DIR", "/data"), "room_settings_backup.json")
+# If the robot never shows as busy after such a start (the start was lost),
+# put the real settings back after this long anyway.
+OVERRIDE_GRACE = 300.0
 
 CONSUMABLE_RESET_KEYS = {
     "main_brush": "main_brush_work_time",
@@ -440,6 +447,18 @@ def lookup(table: dict[str, int], value) -> int:
     raise ValueError(f"{value!r} is not one of {', '.join(table)}")
 
 
+def as_bool(value) -> bool:
+    """A yes/no from a script: true/false, or the strings HA templates render."""
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in ("true", "on", "yes", "1"):
+        return True
+    if text in ("false", "off", "no", "0", "", "none"):
+        return False
+    raise ValueError(f"expected true or false, got {value!r}")
+
+
 def suction_label(code) -> str | None:
     return next((label for label, c in SUCTION.items() if c == code), None)
 
@@ -532,6 +551,44 @@ def apply_room_setting(entry: dict, field: str, value: str, remembered: dict) ->
 def new_customize_entry(segment: int) -> dict:
     return {"segment": segment, "fan_power": DEFAULT_SUCTION, "water_box_mode": DEFAULT_WATER,
             "mop_mode": DEFAULT_ROUTE, "repeat": 1, "seq_type": 0}
+
+
+def vacuum_only_entries(entries: list[dict], segments: list[int]) -> tuple[list[dict], list[int], list[int]]:
+    """The robot's per-room list with water Off for ``segments``, for one vacuum-only job.
+
+    Returns (new list, segments to clean, segments whose entry changed). Mop
+    only rooms are left out of the clean: with the water off there is nothing
+    to do in them. A room never customised gets an entry with the default
+    suction and water Off. Every other room's entry is copied unchanged,
+    because the robot replaces the whole list on every write.
+    """
+    new = [dict(e) for e in entries]
+    by_segment = {e.get("segment"): e for e in new}
+    clean, changed = [], []
+    for segment in segments:
+        entry = by_segment.get(segment)
+        if entry is None:
+            entry = new_customize_entry(segment)
+            new.append(entry)
+            by_segment[segment] = entry
+        elif entry.get("fan_power") == SUCTION["Off"]:
+            continue
+        elif entry.get("water_box_mode") == WATER["Off"]:
+            clean.append(segment)
+            continue
+        entry["water_box_mode"] = WATER["Off"]
+        clean.append(segment)
+        changed.append(segment)
+    return new, clean, changed
+
+
+def customize_matches(saved: list[dict], wanted: list[dict]) -> bool:
+    """True if the robot's list has exactly ``wanted``'s rooms with those values
+    (extra fields the robot adds are ignored)."""
+    by_segment = {e.get("segment"): e for e in saved or []}
+    if set(by_segment) != {e.get("segment") for e in wanted}:
+        return False
+    return all(by_segment[e.get("segment")].get(k) == v for e in wanted for k, v in e.items())
 
 
 def vacuum_state(status: StatusV2) -> str:
@@ -934,10 +991,80 @@ class Bridge:
         self._rooms_flag: int | None = None  # map the per-room settings were read on
         self._rooms_refreshed = 0.0
         self._remembered: dict[int, dict] = {}  # last non-off suction / water per segment
+        # The real per-room list while a vacuum-only job runs with water Off
+        # swapped in: {"flag", "entries", "since" (epoch s), "seen_busy"}.
+        self._override: dict | None = self._load_override()
 
     @property
     def settings_map(self) -> MapEntry | None:
         return find_entry(self.entries, self.cfg.room_settings_map)
+
+    @property
+    def shown_customize(self) -> list[dict] | None:
+        """The per-room list HA should show: the real one, not a job's temporary swap."""
+        if self._override is not None and self._override["flag"] == self._rooms_flag:
+            return self._override["entries"]
+        return self.customize
+
+    # -- temporary per-room settings ------------------------------------------
+
+    @staticmethod
+    def _load_override() -> dict | None:
+        try:
+            with open(OVERRIDE_FILE, encoding="utf-8") as fh:
+                data = json.load(fh)
+            if isinstance(data, dict) and isinstance(data.get("entries"), list) and "flag" in data:
+                _LOGGER.info("Found saved room settings from an unfinished vacuum-only clean; restoring when idle")
+                return {"seen_busy": False, "since": 0.0, **data}
+            _LOGGER.warning("Ignoring unreadable %s", OVERRIDE_FILE)
+        except FileNotFoundError:
+            pass
+        except (OSError, ValueError) as err:
+            _LOGGER.warning("Ignoring unreadable %s: %s", OVERRIDE_FILE, err)
+        return None
+
+    def _save_override(self, flag: int, entries: list[dict]) -> None:
+        self._override = {"flag": flag, "entries": entries, "since": time.time(), "seen_busy": False}
+        tmp = OVERRIDE_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(self._override, fh)
+        os.replace(tmp, OVERRIDE_FILE)
+
+    async def _restore_override(self) -> None:
+        """Write the real per-room list back and forget the backup.
+
+        Raises RoborockException or Refused if the robot did not take it; the
+        backup is kept so the next poll tries again.
+        """
+        entries = self._override["entries"]
+        result = await self.robot.set_customize(entries)
+        if not customize_matches(await self.robot.customize(), entries):
+            raise Refused(f"failed: restoring room settings: robot kept a different list ({result})")
+        self._override = None
+        with contextlib.suppress(FileNotFoundError):
+            os.remove(OVERRIDE_FILE)
+        await self._report("ok: room settings restored after the vacuum-only clean", True)
+
+    async def check_override(self, status: StatusV2) -> None:
+        """Restore the real per-room settings once the job that swapped them is over."""
+        override = self._override
+        if override is None:
+            return
+        if is_busy(status):
+            override["seen_busy"] = True
+            return
+        if not override["seen_busy"] and time.time() - override["since"] < OVERRIDE_GRACE:
+            return  # the job has not started yet (mop pads, dock checks)
+        if status.current_map != override["flag"]:
+            _LOGGER.warning("Room settings to restore belong to map %s; robot is on %s, waiting",
+                            override["flag"], status.current_map)
+            return
+        try:
+            await self._restore_override()
+        except (Refused, RoborockException) as err:
+            _LOGGER.warning("Could not restore room settings yet: %s", err)
+            return
+        await self.refresh_rooms(await self.robot.status(), force=True)
 
     # -- publishing helpers ---------------------------------------------------
 
@@ -998,6 +1125,7 @@ class Bridge:
         # A job just ended: the clean record and consumables changed, read them now.
         await self.refresh_info(force=self._was_busy and not busy)
         await self.refresh_rooms(status)
+        await self.check_override(status)
         self._was_busy = busy
         await self._set_online(True)
         return status
@@ -1024,7 +1152,7 @@ class Bridge:
                     remembered["water_box_mode"] = entry["water_box_mode"]
         self._rooms_refreshed = time.monotonic()
         self._rooms_flag = status.current_map
-        await self._publish(self.topics.rooms, rooms_payload(settings_map, self.customize, on_map), retain=True)
+        await self._publish(self.topics.rooms, rooms_payload(settings_map, self.shown_customize, on_map), retain=True)
 
     async def _report(self, result: str, ok: bool) -> None:
         (_LOGGER.info if ok else _LOGGER.warning)("Command: %s", result)
@@ -1093,6 +1221,7 @@ class Bridge:
         if not ids:
             raise Refused("refused: no rooms selected")
         status = await self._require_idle("room clean")
+        await self._restore_before_new_job(status)
         active = self._active_map(status)
         names = {segment_id(active.flag, r.segment): r for r in active.rooms}
         off_map = [i for i in ids if i not in names]
@@ -1119,10 +1248,13 @@ class Bridge:
         await self.clean_rooms(params)
 
     async def clean_rooms(self, params: dict) -> None:
-        """Clean named rooms with ONE explicit mode, e.g. a script's vacuum or mop phase.
+        """Clean named rooms in order, e.g. a script's vacuum or mop phase.
 
-        params: rooms (robot room names, in order), suction (default Balanced),
-        water (default Off), route (default Standard), passes (default 1).
+        params: rooms (robot room names, in order), then EITHER one explicit
+        mode for the whole job -- suction (default Balanced), water (default
+        Off), route (default Standard), passes (default 1) -- OR
+        ``room_settings: true`` to clean each room with its own per-room
+        settings, optionally with ``vacuum_only: true`` (water Off for this job).
         """
         if not isinstance(params, dict):
             raise Refused(f"refused: clean_rooms params must be a mapping, got {params!r}")
@@ -1132,17 +1264,29 @@ class Bridge:
         if not wanted:
             raise Refused("refused: clean_rooms needs rooms")
         try:
-            fan = lookup(SUCTION, params.get("suction", "Balanced"))
-            water = lookup(WATER, params.get("water", "Off"))
-            route = lookup(ROUTE, params.get("route", "Standard"))
-            passes = int(params.get("passes", 1))
-        except (ValueError, TypeError) as err:
+            room_settings = as_bool(params.get("room_settings", False))
+            vacuum_only = as_bool(params.get("vacuum_only", False))
+        except ValueError as err:
             raise Refused(f"refused: {err}") from err
-        if not 1 <= passes <= 3:
-            raise Refused(f"refused: passes must be 1-3, got {passes}")
-        if fan == SUCTION["Off"] and water == WATER["Off"]:
-            raise Refused("refused: suction and water can't both be Off")
+        explicit = [k for k in ("suction", "water", "route", "passes") if k in params]
+        if room_settings and explicit:
+            raise Refused(f"refused: room_settings uses each room's own settings; drop {', '.join(explicit)}")
+        if vacuum_only and not room_settings:
+            raise Refused("refused: vacuum_only goes with room_settings; otherwise pass water: off")
+        if not room_settings:
+            try:
+                fan = lookup(SUCTION, params.get("suction", "Balanced"))
+                water = lookup(WATER, params.get("water", "Off"))
+                route = lookup(ROUTE, params.get("route", "Standard"))
+                passes = int(params.get("passes", 1))
+            except (ValueError, TypeError) as err:
+                raise Refused(f"refused: {err}") from err
+            if not 1 <= passes <= 3:
+                raise Refused(f"refused: passes must be 1-3, got {passes}")
+            if fan == SUCTION["Off"] and water == WATER["Off"]:
+                raise Refused("refused: suction and water can't both be Off")
         status = await self._require_idle("room clean")
+        await self._restore_before_new_job(status)
         active = self._active_map(status)
         by_name = {_norm(r.name): r for r in active.rooms} | {r.slug: r for r in active.rooms}
         unknown = [w for w in wanted if _norm(w) not in by_name]
@@ -1152,11 +1296,72 @@ class Bridge:
                 f" (rooms: {', '.join(r.name for r in active.rooms)})"
             )
         rooms = [by_name[_norm(w)] for w in wanted]
-        await self.robot.set_job_mode(fan, water, route)
-        result = await self.robot.segment_clean([r.segment for r in rooms], passes)
-        mode = f"{suction_label(fan)} / water {water_label(water)} / {route_label(route)} / x{passes}"
-        await self._report(f"ok: {', '.join(r.name for r in rooms)} ({mode}) -> {result}", True)
+        if not room_settings:
+            await self.robot.set_job_mode(fan, water, route)
+            result = await self.robot.segment_clean([r.segment for r in rooms], passes)
+            mode = f"{suction_label(fan)} / water {water_label(water)} / {route_label(route)} / x{passes}"
+            await self._report(f"ok: {', '.join(r.name for r in rooms)} ({mode}) -> {result}", True)
+        elif not vacuum_only:
+            await self.robot.set_job_mode(CUSTOM_FAN, CUSTOM_WATER, CUSTOM_ROUTE)
+            result = await self.robot.segment_clean([r.segment for r in rooms])
+            await self._report(f"ok: {', '.join(r.name for r in rooms)} (per-room settings) -> {result}", True)
+        else:
+            await self._clean_vacuum_only(active, rooms)
         self._kick()
+
+    async def _clean_vacuum_only(self, active: MapEntry, rooms: list[Room]) -> None:
+        """Per-room settings with water Off: swap Off into the robot's list for
+        this job; check_override() puts the real list back once it is over."""
+        current = await self.robot.customize()
+        if not current and self.customize:
+            raise Refused("refused: robot returned no per-room settings; not overwriting the saved ones")
+        entries, clean, changed = vacuum_only_entries(current, [r.segment for r in rooms])
+        skipped = [r.name for r in rooms if r.segment not in clean]
+        if not clean:
+            raise Refused(f"refused: {', '.join(skipped)} set to Mop only; nothing to vacuum")
+        if changed:
+            # Backup first: if the add-on dies after the write, the file is
+            # what puts the real settings back.
+            self._save_override(active.flag, current)
+            try:
+                result = await self.robot.set_customize(entries)
+                if not customize_matches(await self.robot.customize(), entries):
+                    raise Refused(f"failed: robot did not take the water-off settings ({result})")
+            except (Refused, RoborockException):
+                await self._undo_override()
+                raise
+        try:
+            await self.robot.set_job_mode(CUSTOM_FAN, CUSTOM_WATER, CUSTOM_ROUTE)
+            result = await self.robot.segment_clean(clean)
+        except (Refused, RoborockException):
+            if changed:
+                await self._undo_override()
+            raise
+        names = [r.name for r in rooms if r.segment in clean]
+        note = f"; skipped Mop only: {', '.join(skipped)}" if skipped else ""
+        await self._report(f"ok: {', '.join(names)} (per-room settings, vacuum only{note}) -> {result}", True)
+
+    async def _undo_override(self) -> None:
+        try:
+            await self._restore_override()
+        except (Refused, RoborockException) as err:
+            # Keep the backup; the poll loop retries once the robot is idle.
+            _LOGGER.warning("Could not restore room settings after a failed start: %s", err)
+            return
+        await self.refresh_rooms(await self.robot.status(), force=True)
+
+    async def _restore_before_new_job(self, status: StatusV2) -> None:
+        """A new job must not start on a previous job's swapped-in settings.
+
+        The robot keeps one per-room list per map, so a backup from another map
+        stays put (a job here does not use it) until the robot is back there.
+        """
+        if self._override is None or status.current_map != self._override["flag"]:
+            return
+        try:
+            await self._restore_override()
+        except (Refused, RoborockException) as err:
+            raise Refused(f"refused: could not restore the room settings from the last vacuum-only clean: {err}") from err
 
     # -- per-room settings ----------------------------------------------------
 
@@ -1173,6 +1378,11 @@ class Bridge:
             raise Refused(f"refused: unknown room segment {segment_text!r}")
         try:
             status = await self._require_idle(f"{room.name} {field} change")
+            if self._override is not None:
+                raise Refused(
+                    f"refused {room.name} {field} change: a vacuum-only clean turned the water off for its"
+                    " rooms and has not put the real settings back yet; try again in a minute"
+                )
             if status.current_map != settings_map.flag:
                 raise Refused(f"refused: robot is not on {settings_map.label!r}; per-room settings belong to that map")
             # set_customize_clean_mode REPLACES the whole list, so always start
@@ -1199,7 +1409,7 @@ class Bridge:
             await self._report(f"ok: {room.name} {field} -> {payload.strip()}", True)
         except Refused:
             # Snap the HA control back to what the robot really has.
-            await self._publish(self.topics.rooms, rooms_payload(settings_map, self.customize,
+            await self._publish(self.topics.rooms, rooms_payload(settings_map, self.shown_customize,
                                                                  self._rooms_flag == settings_map.flag), retain=True)
             raise
 

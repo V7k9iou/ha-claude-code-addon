@@ -104,6 +104,26 @@ your HA areas once (Settings → the vacuum entity → Areas), then:
   Defaults: Balanced, water Off, Standard, 1 pass. Suction and water can't
   both be off.
 
+  Or clean the rooms **with their own per-room settings**, in the order
+  given, by passing `room_settings: true` instead of a mode:
+
+  ```yaml
+    params:
+      rooms: [Entrance, Dining room, Kitchen]
+      room_settings: true
+      vacuum_only: true    # optional: water off for this job only
+  ```
+
+  `vacuum_only: true` keeps each room's suction, route and passes but turns
+  the water off for this one job: Vacuum & mop rooms are only vacuumed, and
+  Mop only rooms are left out. The robot can't take "per-room settings, but no
+  water" as a single command, so the add-on writes water Off into the
+  robot's per-room list for those rooms, starts the job, and writes the real
+  list back once the robot is idle again. The real list is also saved to
+  `/data/room_settings_backup.json` until then, so a restart mid-job still
+  restores it. While it is swapped, the per-room controls keep showing the
+  real values and changes to them are refused.
+
 Both are **refused** (nothing is sent) when the robot is busy, when a room is
 not on the active map, or when a name is unknown. `sensor.<name>_last_command`
 says which, and why.
