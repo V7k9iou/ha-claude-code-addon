@@ -1,0 +1,44 @@
+#!/usr/bin/with-contenv bashio
+# ==============================================================================
+# Crib Occupancy Detector — reads the add-on options, resolves MQTT credentials
+# (explicit options win, else the Supervisor's MQTT service), and execs the
+# Python service. s6 supervises it; ./finish runs if it exits.
+# ==============================================================================
+set -e
+
+if ! bashio::config.has_value 'model_url'; then
+    bashio::log.warning "No model_url set: the sensors stay unavailable until a model is configured (a cached one is used if present)."
+fi
+if [[ "$(jq '.cameras | length' /data/options.json)" -eq 0 ]]; then
+    bashio::exit.nok "Add at least one camera under 'cameras'. See DOCS.md."
+fi
+
+export CAMERAS="$(jq -c '.cameras' /data/options.json)"
+export MODEL_URL="$(bashio::config 'model_url' '')"
+export MODEL_CHECK_INTERVAL="$(bashio::config 'model_check_interval' '3600')"
+export INTERVAL="$(bashio::config 'interval' '5')"
+export ON_MINUTES="$(bashio::config 'on_minutes' '5')"
+export OFF_MINUTES="$(bashio::config 'off_minutes' '2')"
+export DISCOVERY_PREFIX="$(bashio::config 'discovery_prefix' 'homeassistant')"
+export LOG_LEVEL="$(bashio::config 'log_level' 'info')"
+export ADDON_VERSION="$(bashio::addon.version)"
+
+if bashio::config.has_value 'mqtt_host'; then
+    bashio::log.info "Using MQTT broker from add-on options"
+    export MQTT_HOST="$(bashio::config 'mqtt_host')"
+    export MQTT_PORT="$(bashio::config 'mqtt_port' '1883')"
+    export MQTT_USERNAME="$(bashio::config 'mqtt_username' '')"
+    export MQTT_PASSWORD="$(bashio::config 'mqtt_password' '')"
+else
+    if ! bashio::services.available mqtt; then
+        bashio::exit.nok "No MQTT service available. Install/start the Mosquitto broker add-on, or set mqtt_host in the options."
+    fi
+    bashio::log.info "Using MQTT broker from the Supervisor MQTT service"
+    export MQTT_HOST="$(bashio::services mqtt 'host')"
+    export MQTT_PORT="$(bashio::services mqtt 'port')"
+    export MQTT_USERNAME="$(bashio::services mqtt 'username')"
+    export MQTT_PASSWORD="$(bashio::services mqtt 'password')"
+fi
+
+bashio::log.info "Starting Crib Occupancy Detector for $(jq -r '[.cameras[].name] | join(", ")' /data/options.json)"
+exec /opt/venv/bin/python /opt/crib_detector/detector.py

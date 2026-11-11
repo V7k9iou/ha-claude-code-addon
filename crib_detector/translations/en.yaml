@@ -1,0 +1,37 @@
+configuration:
+  model_url:
+    name: Model URL
+    description: URL of the model's JSON sidecar on your LAN (see DOCS.md). Without one, the sensors stay unavailable.
+  cameras:
+    name: Cameras
+    description: "One entry per crib: entity_id (the HA camera), id (entity ID slug, e.g. crib_detector), name (device name) and optional area."
+  interval:
+    name: Interval (s)
+    description: How often each camera is checked.
+  on_minutes:
+    name: Minutes before "occupied"
+    description: How long the crib must look occupied before the sensor turns on.
+  off_minutes:
+    name: Minutes before "empty"
+    description: How long the crib must look empty before the sensor turns off.
+  model_check_interval:
+    name: Model check interval (s)
+    description: How often the model URL is checked for a new version.
+  discovery_prefix:
+    name: MQTT discovery prefix
+    description: Home Assistant's MQTT discovery prefix (default homeassistant).
+  mqtt_host:
+    name: MQTT host
+    description: Leave empty to use the Mosquitto add-on through the Supervisor.
+  mqtt_port:
+    name: MQTT port
+    description: Only used with an explicit MQTT host.
+  mqtt_username:
+    name: MQTT username
+    description: Only used with an explicit MQTT host.
+  mqtt_password:
+    name: MQTT password
+    description: Only used with an explicit MQTT host.
+  log_level:
+    name: Log level
+    description: debug, info, warning or error.

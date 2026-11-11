@@ -17,6 +17,10 @@ trust the operator on the other end of the SSH session (i.e. yourself).
 - **[roborock_local_companion](./roborock_local_companion)** — Local-only
   companion for a Matter-paired Roborock: switch saved maps and read robot
   status over the LAN, exposed to HA via MQTT discovery. No cloud, no account.
+- **[crib_detector](./crib_detector)** — Crib occupancy from camera
+  snapshots and a locally run image classifier, as MQTT binary sensors.
+  Images stay in memory; the model is trained elsewhere and pulled over the
+  LAN.
 
 ## Installation as a custom repository
 
