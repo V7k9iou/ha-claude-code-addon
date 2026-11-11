@@ -65,4 +65,4 @@ LABEL \
     org.opencontainers.image.description="SSH into a container running Claude Code with access to Home Assistant config and APIs." \
     org.opencontainers.image.source="https://github.com/talcum/ha-claude-code-addon" \
     org.opencontainers.image.licenses="MIT" \
-    org.opencontainers.image.authors="David <david.talcum489@silomails.com>"
+    org.opencontainers.image.authors="David"
