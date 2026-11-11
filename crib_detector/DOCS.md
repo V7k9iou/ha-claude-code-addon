@@ -11,11 +11,24 @@ Every `interval` seconds (default 5), for each camera:
 4. Compare with the threshold and feed a smoother:
    - **on** when the last `on_minutes` are fully covered by frames and at
      least 80% of them said occupied;
-   - **off** when at most 20% of the last `off_minutes` said occupied;
+   - **off** when the last `off_minutes` are fully covered by frames and at
+     most 20% of them said occupied;
    - otherwise the state holds, so a single misread frame never flips it.
 
+After the add-on starts, the sensor is **unknown** (not off) until one of
+those windows has filled: up to `on_minutes` with a child in the crib, or
+`off_minutes` when it's empty. A restart therefore never reports a sleeping
+child as gone. An automation that triggers on `to: "on"` will fire again
+after a restart when the state goes from unknown to on. Add `from: "off"` if
+that matters. After a camera outage the state holds until a full window has
+been seen again.
+
 A camera with no usable frame for 2 minutes goes unavailable. So does every
-camera while there is no model yet.
+camera while there is no model yet, and every entity if the add-on stops or
+crashes (MQTT last will).
+
+The model check runs on its own, so downloading or loading a new model never
+pauses detection.
 
 ## Options
 
@@ -76,3 +89,7 @@ training machine is off, the cached model keeps running.
 From a shell in the container: `/opt/venv/bin/python /opt/crib_detector/detector.py --check`
 fetches the model and one frame per camera and prints numbers only (frame
 size, probability, threshold, time taken).
+
+Offline tests (no camera, broker or real model; onnxruntime is faked):
+`python -m pytest crib_detector/tests` with numpy, pillow, aiohttp and pytest
+installed.

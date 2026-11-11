@@ -13,7 +13,8 @@ probability and the derived on/off state leave this process.
 Entities per camera (one MQTT device each):
   binary_sensor <id>_occupied     -- on once the child has been in the crib for
                                      on_minutes (default 5), off once the crib
-                                     has looked empty for off_minutes
+                                     has looked empty for off_minutes; unknown
+                                     after a start until one of those is met
   sensor        <id>_probability  -- latest raw P(occupied), % (diagnostic)
   sensor        <id>_model        -- model version in use (diagnostic)
 
@@ -68,6 +69,11 @@ MODEL_DIR = os.path.join(DATA_DIR, "model")
 HTTP_TIMEOUT = aiohttp.ClientTimeout(total=20)
 MODEL_TIMEOUT = aiohttp.ClientTimeout(total=300)
 MQTT_RECONNECT = 10.0
+# Add-on level availability: "online" once connected, "offline" via the MQTT
+# last will if the process dies, so HA never shows a frozen state as live.
+STATUS_TOPIC = "crib_detector/status"
+# Retry interval for the model URL while there is no model at all.
+NO_MODEL_RETRY = 60.0
 # A camera with no good frame for this long goes unavailable in HA.
 STALE_AFTER = 120.0
 # Hysteresis on the smoothed state: on needs this share of "occupied" frames
@@ -274,8 +280,10 @@ async def fetch_model(http: aiohttp.ClientSession, url: str, current: str | None
     expected = sidecar.get("sha256")
     if expected and hashlib.sha256(onnx_bytes).hexdigest() != str(expected).lower():
         raise ModelError(f"sha256 mismatch for {model_url}")
-    model = Model(sidecar, onnx_bytes)  # validates before it replaces the cache
-    save_cached_model(sidecar, onnx_bytes)
+    # Validates before it replaces the cache. Both in a thread: building the
+    # session takes seconds on the Pi and must not stall the camera loop.
+    model = await asyncio.to_thread(Model, sidecar, onnx_bytes)
+    await asyncio.to_thread(save_cached_model, sidecar, onnx_bytes)
     return model
 
 
@@ -289,25 +297,29 @@ class Smoother:
     """Turns per-frame yes/no into a stable occupied state.
 
     On: the last ``on_seconds`` are fully covered by frames and at least
-    ON_FRACTION of them said occupied. Off: at most OFF_FRACTION of the last
-    ``off_seconds`` said occupied. In between, the state holds.
+    ON_FRACTION of them said occupied. Off: the last ``off_seconds`` are fully
+    covered and at most OFF_FRACTION of them said occupied. In between, the
+    state holds. It starts as None (unknown), so a restart never reports a
+    sleeping child as "empty"; and after a camera outage the state holds until
+    a full window has been seen again.
     """
 
     on_seconds: float
     off_seconds: float
     interval: float
     samples: deque = field(default_factory=deque)  # (monotonic time, occupied)
-    state: bool = False
+    state: bool | None = None
 
-    def add(self, now: float, occupied: bool) -> bool:
+    def add(self, now: float, occupied: bool) -> bool | None:
         self.samples.append((now, occupied))
         horizon = max(self.on_seconds, self.off_seconds) + 2 * self.interval
         while self.samples and now - self.samples[0][0] > horizon:
             self.samples.popleft()
-        if not self.state and self._covered(now, self.on_seconds) \
+        if self.state is not True and self._covered(now, self.on_seconds) \
                 and self._fraction(now, self.on_seconds) >= ON_FRACTION:
             self.state = True
-        elif self.state and self._fraction(now, self.off_seconds) <= OFF_FRACTION:
+        elif self.state is not False and self._covered(now, self.off_seconds) \
+                and self._fraction(now, self.off_seconds) <= OFF_FRACTION:
             self.state = False
         return self.state
 
@@ -357,7 +369,9 @@ def discovery_payload(cfg: Config, camera: Camera) -> dict:
         "device": device,
         "origin": {"name": "Crib Occupancy Detector", "sw_version": cfg.addon_version},
         "state_topic": f"{topic}/state",
-        "availability_topic": f"{topic}/availability",
+        # Both must be online: the add-on (last will) and this camera's frames.
+        "availability": [{"topic": STATUS_TOPIC}, {"topic": f"{topic}/availability"}],
+        "availability_mode": "all",
         "qos": 0,
         "components": {
             "occupied": {
@@ -366,7 +380,9 @@ def discovery_payload(cfg: Config, camera: Camera) -> dict:
                 "unique_id": f"{uid}_occupied",
                 "default_entity_id": f"binary_sensor.{camera.id}_occupied",
                 "device_class": "occupancy",
-                "value_template": "{{ 'ON' if value_json.occupied else 'OFF' }}",
+                # null while the smoother is undecided -> "None" -> unknown in HA
+                "value_template": "{{ None if value_json.occupied is none "
+                                  "else ('ON' if value_json.occupied else 'OFF') }}",
             },
             "probability": {
                 "platform": "sensor",
@@ -409,7 +425,6 @@ class Detector:
         self.last_ok = {c.id: 0.0 for c in cfg.cameras}
         self.available = {c.id: None for c in cfg.cameras}
         self._mqtt = None
-        self._model_checked = 0.0
 
     async def _publish(self, topic: str, payload, retain: bool = False) -> None:
         if self._mqtt is None:
@@ -434,14 +449,9 @@ class Detector:
     async def check_model(self, http: aiohttp.ClientSession) -> None:
         if not self.cfg.model_url:
             return
-        if self.model and time.monotonic() - self._model_checked < self.cfg.model_check_interval:
-            return
-        if not self.model and time.monotonic() - self._model_checked < 60:
-            return  # no model yet: retry every minute, not every frame
-        self._model_checked = time.monotonic()
         try:
             new = await fetch_model(http, self.cfg.model_url, self.model.version if self.model else None)
-        except (aiohttp.ClientError, TimeoutError, ValueError, ModelError) as err:
+        except (aiohttp.ClientError, TimeoutError, ValueError, OSError, ModelError) as err:
             _LOGGER.warning("Model check failed (%s); %s", err,
                             f"keeping {self.model.version}" if self.model else "no model yet")
             return
@@ -479,10 +489,15 @@ class Detector:
         }, retain=True)
         await self._set_available(camera, True)
 
+    async def model_loop(self, http: aiohttp.ClientSession) -> None:
+        """Own task, so a slow download never pauses the cameras."""
+        while True:
+            await self.check_model(http)
+            await asyncio.sleep(self.cfg.model_check_interval if self.model else NO_MODEL_RETRY)
+
     async def loop(self, http: aiohttp.ClientSession) -> None:
         while True:
             started = time.monotonic()
-            await self.check_model(http)
             await asyncio.gather(*(self.run_camera(http, c) for c in self.cfg.cameras))
             await asyncio.sleep(max(0.5, self.cfg.interval - (time.monotonic() - started)))
 
@@ -490,32 +505,40 @@ class Detector:
         import aiomqtt
 
         async with aiohttp.ClientSession() as http:
-            while True:
-                try:
-                    async with aiomqtt.Client(
-                        self.cfg.mqtt_host, self.cfg.mqtt_port,
-                        username=self.cfg.mqtt_username or None,
-                        password=self.cfg.mqtt_password or None,
-                        identifier="crib_detector",
-                        keepalive=60,
-                    ) as mqtt:
-                        _LOGGER.info("Connected to MQTT broker %s:%s", self.cfg.mqtt_host, self.cfg.mqtt_port)
-                        self._mqtt = mqtt
-                        self.available = {c.id: None for c in self.cfg.cameras}
-                        for camera in self.cfg.cameras:
-                            await self._publish(discovery_topic(self.cfg, camera),
-                                                discovery_payload(self.cfg, camera), retain=True)
-                        await self.loop(http)
-                except aiomqtt.MqttError as err:
-                    _LOGGER.warning("MQTT connection lost: %s (retry in %.0fs)", err, MQTT_RECONNECT)
-                finally:
-                    self._mqtt = None
-                await asyncio.sleep(MQTT_RECONNECT)
+            model_task = asyncio.create_task(self.model_loop(http))
+            try:
+                await self._run_mqtt(http, aiomqtt)
+            finally:
+                model_task.cancel()
+
+    async def _run_mqtt(self, http: aiohttp.ClientSession, aiomqtt) -> None:
+        while True:
+            try:
+                async with aiomqtt.Client(
+                    self.cfg.mqtt_host, self.cfg.mqtt_port,
+                    username=self.cfg.mqtt_username or None,
+                    password=self.cfg.mqtt_password or None,
+                    identifier="crib_detector",
+                    keepalive=60,
+                    will=aiomqtt.Will(STATUS_TOPIC, "offline", qos=1, retain=True),
+                ) as mqtt:
+                    _LOGGER.info("Connected to MQTT broker %s:%s", self.cfg.mqtt_host, self.cfg.mqtt_port)
+                    self._mqtt = mqtt
+                    self.available = {c.id: None for c in self.cfg.cameras}
+                    for camera in self.cfg.cameras:
+                        await self._publish(discovery_topic(self.cfg, camera),
+                                            discovery_payload(self.cfg, camera), retain=True)
+                    await self._publish(STATUS_TOPIC, "online", retain=True)
+                    await self.loop(http)
+            except aiomqtt.MqttError as err:
+                _LOGGER.warning("MQTT connection lost: %s (retry in %.0fs)", err, MQTT_RECONNECT)
+            finally:
+                self._mqtt = None
+            await asyncio.sleep(MQTT_RECONNECT)
 
     async def check(self) -> None:
         """--check: fetch the model and one frame per camera, print numbers only."""
         async with aiohttp.ClientSession() as http:
-            self._model_checked = -1e9
             await self.check_model(http)
             print("model:", self.model.version if self.model else None)
             for camera in self.cfg.cameras:

@@ -13,7 +13,7 @@ Entities per camera (one MQTT device each, `<id>` from the options):
 
 | Entity | What it is |
 |---|---|
-| `binary_sensor.<id>_occupied` | On once the crib has looked occupied for `on_minutes` (default 5); off once it has looked empty for `off_minutes` (default 2). |
+| `binary_sensor.<id>_occupied` | On once the crib has looked occupied for `on_minutes` (default 5); off once it has looked empty for `off_minutes` (default 2). Unknown after a start until one of those is met. |
 | `sensor.<id>_probability` | The latest raw P(occupied), % (diagnostic). |
 | `sensor.<id>_model` | The model version in use (diagnostic). |
 
