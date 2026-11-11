@@ -76,6 +76,7 @@ trainer is off, the cached model keeps running. `model_token` is sent as
   "input": {"name": "image", "shape": [1, 3, 320, 320], "layout": "NCHW",
             "color": "RGB", "range": [0, 255]},
   "output": {"name": "p_occupied", "shape": [1, 1]},
+  "preprocessing": {"expected_frame_size": [640, 360]},
   "cameras": {
     "first":  {"crop": [0.06, 0.02, 0.95, 0.91], "threshold": 0.58},
     "second": {"crop": [0.06, 0.04, 0.94, 0.88], "threshold": 0.53}
@@ -93,6 +94,11 @@ Per camera, exactly as the trainer prepared its data:
    graph.
 5. The output is already P(occupied). Occupied when it's at least that
    camera's `threshold`.
+
+`preprocessing.expected_frame_size` (optional) is the snapshot size the
+model was trained for. Home Assistant's Protect snapshots are 640x360. If a
+camera's snapshots differ, the add-on logs one warning per camera and keeps
+running.
 
 The add-on only implements this format. A sidecar that asks for anything
 else, such as another layout, colour order or value range, is rejected and

@@ -222,6 +222,14 @@ class Model:
                 raise ModelError(f"input {key} {inp[key]!r} is not supported (need {want!r})")
         if "shape" in out and [int(n) for n in out["shape"]] != [1, 1]:
             raise ModelError(f"output shape {out['shape']} is not [1, 1]")
+        # The frame size the model was trained for, e.g. [640, 360]. A different
+        # snapshot size still runs but scores worse, so it's logged, not refused.
+        expected_size = (sidecar.get("preprocessing") or {}).get("expected_frame_size")
+        try:
+            self.expected_size = tuple(int(n) for n in expected_size) if expected_size else None
+        except (TypeError, ValueError) as err:
+            raise ModelError(f"preprocessing.expected_frame_size {expected_size!r}: {err}") from err
+        self._size_warned: set[str] = set()
         missing = [k for k in required_keys if k not in self.cameras]
         if missing:
             raise ModelError(f"sidecar has no camera entry for {missing} (it has {sorted(self.cameras)})")
@@ -252,6 +260,10 @@ class Model:
     def preprocess(self, jpeg: bytes, key: str) -> np.ndarray:
         with Image.open(io.BytesIO(jpeg)) as img:
             img = img.convert("RGB")
+            if self.expected_size and img.size != self.expected_size and key not in self._size_warned:
+                self._size_warned.add(key)
+                _LOGGER.warning("Camera %s: snapshots are %dx%d but model %s expects %dx%d; accuracy may suffer",
+                                key, *img.size, self.version, *self.expected_size)
             box = self.crop_box(self.cameras[key].crop, img.width, img.height)
             img = img.crop(box).resize((self.size, self.size), Image.Resampling.BILINEAR, reducing_gap=None)
             pixels = np.asarray(img, dtype=np.uint8).transpose(2, 0, 1).astype(np.float32)

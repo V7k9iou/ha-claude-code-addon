@@ -215,6 +215,23 @@ def test_predict_feeds_named_input_and_reads_probability():
     assert FakeSession.last_input.shape == (1, 3, 32, 32)
 
 
+def test_frame_size_mismatch_warns_once_per_camera(caplog):
+    m = detector.Model(sidecar(preprocessing={"expected_frame_size": [640, 360]}), b"x")
+    m.preprocess(jpeg(size=(640, 360)), "thomas")
+    assert not caplog.records
+    for _ in range(3):
+        m.preprocess(jpeg(size=(1280, 720)), "thomas")
+    m.preprocess(jpeg(size=(1280, 720)), "sophie")
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 2 and "1280x720" in warnings[0] and "640x360" in warnings[0]
+
+
+def test_expected_frame_size_is_optional_but_must_be_numbers():
+    assert detector.Model(sidecar(), b"x").expected_size is None
+    with pytest.raises(detector.ModelError):
+        detector.Model(sidecar(preprocessing={"expected_frame_size": ["wide", 360]}), b"x")
+
+
 def test_thresholds_per_camera_key():
     m = detector.Model(sidecar(), b"x")
     assert m.threshold("thomas") == 0.580204
