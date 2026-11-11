@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.10 — write access to local add-ons
+
+- `/addons` (Home Assistant's local add-ons folder) is now mounted
+  read-write, so Claude can deploy its own add-ons there from a private git
+  repository and build, install and update them through the Supervisor API.
+  This lets Claude install software on the host without a pull request.
+  Changes to this add-on itself still go through this public repository.
+
 ## 0.1.9 — update Claude Code to 2.1.280
 
 - Bump the Claude Code pin from `2.1.226` to `2.1.280`, the current `latest`

@@ -20,7 +20,7 @@ canonical paths directly:
 | `/share/`               | shared folder           | rw   | accessible from HA + other add-ons |
 | `/media/`               | media folder            | rw   | media library |
 | `/addon_configs/`       | all add-on configs      | rw   | per-add-on persistent config |
-| `/addons/`              | local add-on dir        | ro   | source of local add-ons (don't edit here) |
+| `/addons/`              | local add-on dir        | rw   | source of local add-ons; deploy add-ons from their git repo, don't hand-edit |
 | `/ssl/`                 | SSL certs               | ro   | Let's Encrypt etc. |
 | `/backup/`              | HA backups              | ro   | inspect, don't write |
 | `/data/`                | this add-on's storage   | rw   | YOUR Claude config, SSH keys, persistent state |
