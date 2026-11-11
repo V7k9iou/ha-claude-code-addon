@@ -1113,7 +1113,14 @@ class Bridge:
             message = {"command": payload.strip()}
         if not isinstance(message, dict):
             message = {"command": str(message)}
-        command, params = message.get("command"), message.get("params") or {}
+        command = message.get("command")
+        # HA's MQTT vacuum publishes send_command params flattened into the top
+        # level: {"command": ..., "rooms": [...], ...}. A nested "params" key is
+        # also accepted (scripts written for 0.2.0-0.2.1 nest it on purpose).
+        if isinstance(message.get("params"), dict):
+            params = message["params"]
+        else:
+            params = {k: v for k, v in message.items() if k != "command"}
         if command != "clean_rooms":
             raise Refused(f"refused: unknown command {command!r} (known: clean_rooms)")
         await self.clean_rooms(params)
