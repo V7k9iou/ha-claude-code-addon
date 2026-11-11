@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.11 — update Claude Code to 2.1.322
+
+- Bump the Claude Code pin from `2.1.280` to `2.1.322`, the current `latest`
+  on npm (`stable` is `2.1.311`).
+- Why now: this session can send messages to Claude sessions on other
+  machines, but their replies don't reach it. The other side reports that
+  this session hasn't said it can receive messages from other sessions.
+  Updating is the first thing to try; it isn't confirmed to fix it.
+
 ## 0.1.10 — write access to local add-ons
 
 - `/addons` (Home Assistant's local add-ons folder) is now mounted
