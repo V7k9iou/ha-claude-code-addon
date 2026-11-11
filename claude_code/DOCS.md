@@ -168,7 +168,7 @@ Mapped directories inside the container:
 | `/share/` | `/share` | rw |
 | `/media/` | `/media` | rw |
 | `/addon_configs/` | all add-on configs | rw |
-| `/addons/` | local add-ons | ro |
+| `/addons/` | local add-ons | rw |
 | `/ssl/` | SSL certs | ro |
 | `/backup/` | HA backups | ro |
 | `/data/` | this add-on's persistent storage | rw |

@@ -9,7 +9,7 @@
     /homeassistant       HA config (configuration.yaml, automations, scenes...)
     /share               Shared folder
     /media               Media folder
-    /addons              Local add-ons (read-only)
+    /addons              Local add-ons
     /addon_configs       All add-on configs
     /ssl                 SSL certs (read-only)
     /backup              Backups (read-only)
