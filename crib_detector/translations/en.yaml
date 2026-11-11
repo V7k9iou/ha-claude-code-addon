@@ -2,9 +2,15 @@ configuration:
   model_url:
     name: Model URL
     description: URL of the model's JSON sidecar on your LAN (see DOCS.md). Without one, the sensors stay unavailable.
+  model_token:
+    name: Model server token
+    description: Bearer token for the model server (sent on every request to it).
+  telemetry:
+    name: Send probabilities to the model server
+    description: POSTs each camera's P(occupied) (numbers only, never images) to the model server's /telemetry once a minute.
   cameras:
     name: Cameras
-    description: "One entry per crib: entity_id (the HA camera), id (entity ID slug, e.g. crib_detector), name (device name) and optional area."
+    description: "One entry per crib: entity_id (the HA camera), id (entity ID slug, e.g. crib_detector), name (device name), optional area, and optional model_key (this camera's entry in the model's sidecar; defaults to id)."
   interval:
     name: Interval (s)
     description: How often each camera is checked.

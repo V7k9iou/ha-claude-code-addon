@@ -18,28 +18,27 @@ Entities per camera (one MQTT device each):
   sensor        <id>_probability  -- latest raw P(occupied), % (diagnostic)
   sensor        <id>_model        -- model version in use (diagnostic)
 
-The model is pulled from ``model_url``: a JSON sidecar (format below) that
-names the ONNX file next to it. Both are cached in /data so the detector keeps
-working when the training machine is off.
-
-Sidecar (all keys except "version" and "model" optional)::
+The model comes from the trainer on the LAN (``model_url``): a JSON sidecar,
+then ``<version>.onnx`` next to it, with a bearer token on every request. Both
+are cached in /data so the detector keeps working when the trainer is off.
+The sidecar format is the trainer's (crib_detector/docs/PI_HANDOFF.md on the
+Mac); the parts this add-on reads::
 
     {
-      "version": "2026-11-10.1",
-      "model": "model.onnx",              # relative to the sidecar URL
-      "sha256": "<hex of the onnx file>",
-      "input": {"width": 224, "height": 224,
-                "resize": "stretch",      # stretch | letterbox | center_crop
-                "color": "RGB",           # RGB | BGR | L (grayscale)
-                "layout": "NCHW",         # NCHW | NHWC
-                "scale": 255.0,           # pixel / scale, then (x - mean) / std
-                "mean": [0.485, 0.456, 0.406],
-                "std": [0.229, 0.224, 0.225]},
-      "output": {"type": "softmax",       # softmax | sigmoid | probability
-                 "occupied_index": 1},    # which output is "occupied" (softmax)
-      "threshold": 0.5,
-      "cameras": {"<camera id>": {"threshold": 0.6}}
+      "version": "...",
+      "onnx": {"sha256": "<hex of <version>.onnx>"},
+      "input": {"name": "image", "shape": [1, 3, S, S], "layout": "NCHW",
+                "color": "RGB", "range": [0, 255]},     # raw pixels, as float32
+      "output": {"name": "p_occupied", "shape": [1, 1]}, # already a probability
+      "cameras": {"<model_key>": {"crop": [x0, y0, x1, y1],  # fractions of W, H
+                                  "threshold": 0.58}}
     }
+
+Every configured camera's ``model_key`` must be in "cameras": a model without
+one is rejected, never run with a default.
+
+Each camera's p_occupied (numbers only) is also POSTed back to the trainer's
+/telemetry once a minute unless ``telemetry`` is off.
 """
 
 from __future__ import annotations
@@ -55,7 +54,7 @@ import sys
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from urllib.parse import urljoin
+from urllib.parse import quote, urljoin
 
 import aiohttp
 import numpy as np
@@ -74,6 +73,10 @@ MQTT_RECONNECT = 10.0
 STATUS_TOPIC = "crib_detector/status"
 # Retry interval for the model URL while there is no model at all.
 NO_MODEL_RETRY = 60.0
+# Telemetry: one POST per minute; if the trainer is down, keep the newest
+# readings (about 4 h for two cameras at 5 s) and drop the oldest.
+TELEMETRY_EVERY = 60.0
+TELEMETRY_MAX = 6000
 # A camera with no good frame for this long goes unavailable in HA.
 STALE_AFTER = 120.0
 # Hysteresis on the smoothed state: on needs this share of "occupied" frames
@@ -94,12 +97,15 @@ class Camera:
     id: str  # entity id slug for our entities, e.g. crib_detector
     name: str  # device name in HA, e.g. "Thomas' room crib"
     area: str = ""
+    model_key: str = ""  # this camera's entry in the sidecar's "cameras"
 
 
 @dataclass(frozen=True)
 class Config:
     cameras: tuple[Camera, ...]
     model_url: str
+    model_token: str
+    telemetry: bool
     model_check_interval: float
     interval: float
     on_minutes: float
@@ -121,12 +127,15 @@ class Config:
                 id=c["id"],
                 name=c.get("name") or c["id"],
                 area=c.get("area") or "",
+                model_key=c.get("model_key") or c["id"],
             )
             for c in json.loads(os.environ.get("CAMERAS", "[]"))
         )
         return cls(
             cameras=cameras,
             model_url=os.environ.get("MODEL_URL", "").strip(),
+            model_token=os.environ.get("MODEL_TOKEN", "").strip(),
+            telemetry=os.environ.get("TELEMETRY", "true").lower() == "true",
             model_check_interval=float(os.environ.get("MODEL_CHECK_INTERVAL", "3600")),
             interval=float(os.environ.get("INTERVAL", "5")),
             on_minutes=float(os.environ.get("ON_MINUTES", "5")),
@@ -141,6 +150,18 @@ class Config:
             addon_version=os.environ.get("ADDON_VERSION", "dev"),
         )
 
+    @property
+    def model_keys(self) -> tuple[str, ...]:
+        return tuple(c.model_key for c in self.cameras)
+
+    @property
+    def auth(self) -> dict:
+        return {"Authorization": f"Bearer {self.model_token}"} if self.model_token else {}
+
+    @property
+    def telemetry_url(self) -> str:
+        return urljoin(self.model_url, "/telemetry") if self.telemetry and self.model_url else ""
+
 
 # ----------------------------------------------------------------------------
 # Model
@@ -151,93 +172,98 @@ class ModelError(Exception):
     """The sidecar or the ONNX file is unusable."""
 
 
-class Model:
-    """One ONNX classifier plus the sidecar that says how to feed it."""
+@dataclass(frozen=True)
+class CameraSpec:
+    """One camera's entry in the sidecar: crop box (fractions) and threshold."""
 
-    def __init__(self, sidecar: dict, onnx_bytes: bytes) -> None:
-        self.sidecar = sidecar
-        self.version = str(sidecar.get("version") or "unknown")
-        spec = sidecar.get("input") or {}
-        self.width = int(spec.get("width", 224))
-        self.height = int(spec.get("height", 224))
-        self.resize = str(spec.get("resize", "stretch")).lower()
-        self.color = str(spec.get("color", "RGB")).upper()
-        self.layout = str(spec.get("layout", "NCHW")).upper()
-        self.scale = float(spec.get("scale", 255.0))
-        channels = 1 if self.color == "L" else 3
-        self.mean = np.asarray(spec.get("mean", [0.0] * channels), dtype=np.float32)
-        self.std = np.asarray(spec.get("std", [1.0] * channels), dtype=np.float32)
-        out = sidecar.get("output") or {}
-        self.output_type = str(out.get("type", "softmax")).lower()
-        self.occupied_index = int(out.get("occupied_index", 1))
-        self.default_threshold = float(sidecar.get("threshold", 0.5))
-        self.thresholds = {
-            key: float(value["threshold"])
-            for key, value in (sidecar.get("cameras") or {}).items()
-            if isinstance(value, dict) and "threshold" in value
-        }
-        if self.resize not in ("stretch", "letterbox", "center_crop"):
-            raise ModelError(f"unknown resize {self.resize!r}")
-        if self.color not in ("RGB", "BGR", "L"):
-            raise ModelError(f"unknown color {self.color!r}")
-        if self.layout not in ("NCHW", "NHWC"):
-            raise ModelError(f"unknown layout {self.layout!r}")
-        if self.output_type not in ("softmax", "sigmoid", "probability"):
-            raise ModelError(f"unknown output type {self.output_type!r}")
+    crop: tuple[float, float, float, float]
+    threshold: float
+
+    @classmethod
+    def parse(cls, key: str, raw) -> CameraSpec:
+        try:
+            x0, y0, x1, y1 = (float(v) for v in raw["crop"])
+            threshold = float(raw["threshold"])
+        except (KeyError, TypeError, ValueError) as err:
+            raise ModelError(f"camera {key!r}: needs crop [x0, y0, x1, y1] and threshold ({err!r})") from err
+        if not (0.0 <= x0 < x1 <= 1.0 and 0.0 <= y0 < y1 <= 1.0):
+            raise ModelError(f"camera {key!r}: crop {[x0, y0, x1, y1]} is not inside 0..1")
+        if not 0.0 < threshold < 1.0:
+            raise ModelError(f"camera {key!r}: threshold {threshold} is not between 0 and 1")
+        return cls((x0, y0, x1, y1), threshold)
+
+
+class Model:
+    """One ONNX classifier plus the sidecar that says how to feed it.
+
+    ``preprocess`` mirrors the trainer's ``preprocessing.steps`` call for
+    call. If the trainer changes them, change this too, or the scores drift
+    without any error.
+    """
+
+    def __init__(self, sidecar: dict, onnx_bytes: bytes, required_keys: tuple[str, ...] = ()) -> None:
+        try:
+            self.version = str(sidecar["version"])
+            inp, out = sidecar["input"], sidecar["output"]
+            self.input_name = str(inp["name"])
+            self.output_name = str(out["name"])
+            shape = [int(n) for n in inp["shape"]]
+            cameras = sidecar["cameras"]
+            self.cameras = {str(k): CameraSpec.parse(str(k), v) for k, v in cameras.items()}
+        except (KeyError, TypeError, ValueError, AttributeError) as err:
+            raise ModelError(f"malformed sidecar: {err!r}") from err
+        if len(shape) != 4 or shape[:2] != [1, 3] or shape[2] != shape[3] or shape[2] < 1:
+            raise ModelError(f"input shape {shape} is not [1, 3, S, S]")
+        self.size = shape[2]
+        # Only what this code implements; anything else must fail loudly.
+        expected = {"layout": "NCHW", "color": "RGB", "range": [0, 255]}
+        for key, want in expected.items():
+            if key in inp and inp[key] != want:
+                raise ModelError(f"input {key} {inp[key]!r} is not supported (need {want!r})")
+        if "shape" in out and [int(n) for n in out["shape"]] != [1, 1]:
+            raise ModelError(f"output shape {out['shape']} is not [1, 1]")
+        missing = [k for k in required_keys if k not in self.cameras]
+        if missing:
+            raise ModelError(f"sidecar has no camera entry for {missing} (it has {sorted(self.cameras)})")
         options = ort.SessionOptions()
         options.intra_op_num_threads = 2  # leave the Pi's other cores to HA
         try:
             self.session = ort.InferenceSession(onnx_bytes, options, providers=["CPUExecutionProvider"])
         except Exception as err:  # noqa: BLE001 - onnxruntime raises its own types
             raise ModelError(f"onnxruntime could not load the model: {err}") from err
-        self.input_name = self.session.get_inputs()[0].name
+        if self.input_name not in [i.name for i in self.session.get_inputs()]:
+            raise ModelError(f"model has no input {self.input_name!r}")
+        if self.output_name not in [o.name for o in self.session.get_outputs()]:
+            raise ModelError(f"model has no output {self.output_name!r}")
 
-    def threshold(self, camera_id: str) -> float:
-        return self.thresholds.get(camera_id, self.default_threshold)
+    def threshold(self, key: str) -> float:
+        return self.cameras[key].threshold
 
-    def preprocess(self, jpeg: bytes) -> np.ndarray:
+    @staticmethod
+    def crop_box(crop: tuple[float, float, float, float], width: int, height: int) -> tuple[int, int, int, int]:
+        """The trainer's step 2, verbatim: fractions to a pixel box, never empty."""
+        x0, y0, x1, y1 = crop
+        left = min(max(int(round(x0 * width)), 0), width - 1)
+        top = min(max(int(round(y0 * height)), 0), height - 1)
+        right = min(max(int(round(x1 * width)), left + 1), width)
+        bottom = min(max(int(round(y1 * height)), top + 1), height)
+        return left, top, right, bottom
+
+    def preprocess(self, jpeg: bytes, key: str) -> np.ndarray:
         with Image.open(io.BytesIO(jpeg)) as img:
-            img = img.convert("L" if self.color == "L" else "RGB")
-            img = self._resize(img)
-            pixels = np.asarray(img, dtype=np.float32)
-        if pixels.ndim == 2:
-            pixels = pixels[:, :, None]
-        if self.color == "BGR":
-            pixels = pixels[:, :, ::-1]
-        pixels = (pixels / self.scale - self.mean) / self.std
-        if self.layout == "NCHW":
-            pixels = pixels.transpose(2, 0, 1)
-        return np.ascontiguousarray(pixels[None, ...], dtype=np.float32)
+            img = img.convert("RGB")
+            box = self.crop_box(self.cameras[key].crop, img.width, img.height)
+            img = img.crop(box).resize((self.size, self.size), Image.Resampling.BILINEAR, reducing_gap=None)
+            pixels = np.asarray(img, dtype=np.uint8).transpose(2, 0, 1).astype(np.float32)
+        return pixels[None]  # raw 0..255: normalisation is inside the graph
 
-    def _resize(self, img: Image.Image) -> Image.Image:
-        size = (self.width, self.height)
-        if self.resize == "stretch":
-            return img.resize(size, Image.BILINEAR)
-        if self.resize == "center_crop":
-            ratio = max(self.width / img.width, self.height / img.height)
-            scaled = img.resize((round(img.width * ratio), round(img.height * ratio)), Image.BILINEAR)
-            left = (scaled.width - self.width) // 2
-            top = (scaled.height - self.height) // 2
-            return scaled.crop((left, top, left + self.width, top + self.height))
-        ratio = min(self.width / img.width, self.height / img.height)
-        scaled = img.resize((round(img.width * ratio), round(img.height * ratio)), Image.BILINEAR)
-        canvas = Image.new(img.mode, size)  # black, like the privacy mask
-        canvas.paste(scaled, ((self.width - scaled.width) // 2, (self.height - scaled.height) // 2))
-        return canvas
-
-    def predict(self, jpeg: bytes) -> float:
-        """P(occupied) for one snapshot."""
-        raw = self.session.run(None, {self.input_name: self.preprocess(jpeg)})[0]
-        values = np.asarray(raw, dtype=np.float64).reshape(-1)
-        if self.output_type == "probability":
-            return float(values[0])
-        if self.output_type == "sigmoid":
-            return float(1.0 / (1.0 + np.exp(-values[0])))
-        exp = np.exp(values - values.max())
-        return float(exp[self.occupied_index] / exp.sum())
+    def predict(self, jpeg: bytes, key: str) -> float:
+        """P(occupied) for one snapshot from the camera with sidecar key ``key``."""
+        raw = self.session.run([self.output_name], {self.input_name: self.preprocess(jpeg, key)})[0]
+        return float(np.asarray(raw, dtype=np.float64).reshape(-1)[0])
 
 
-def load_cached_model() -> Model | None:
+def load_cached_model(required_keys: tuple[str, ...] = ()) -> Model | None:
     try:
         with open(os.path.join(MODEL_DIR, "sidecar.json"), encoding="utf-8") as fh:
             sidecar = json.load(fh)
@@ -249,9 +275,9 @@ def load_cached_model() -> Model | None:
         _LOGGER.warning("Ignoring unreadable cached model: %s", err)
         return None
     try:
-        return Model(sidecar, onnx_bytes)
+        return Model(sidecar, onnx_bytes, required_keys)
     except ModelError as err:
-        _LOGGER.warning("Ignoring cached model: %s", err)
+        _LOGGER.error("Ignoring cached model: %s", err)
         return None
 
 
@@ -264,25 +290,29 @@ def save_cached_model(sidecar: dict, onnx_bytes: bytes) -> None:
         os.replace(tmp, os.path.join(MODEL_DIR, name))
 
 
-async def fetch_model(http: aiohttp.ClientSession, url: str, current: str | None) -> Model | None:
+async def fetch_model(http: aiohttp.ClientSession, url: str, current: str | None,
+                      headers: dict | None = None, required_keys: tuple[str, ...] = ()) -> Model | None:
     """The model at ``url`` if its version differs from ``current``, else None."""
-    async with http.get(url, timeout=HTTP_TIMEOUT) as resp:
+    async with http.get(url, headers=headers, timeout=HTTP_TIMEOUT) as resp:
         resp.raise_for_status()
         sidecar = json.loads(await resp.text())
-    if not isinstance(sidecar, dict) or not sidecar.get("model") or not sidecar.get("version"):
-        raise ModelError("sidecar needs at least 'version' and 'model'")
-    if str(sidecar["version"]) == current:
+    if not isinstance(sidecar, dict) or not sidecar.get("version"):
+        raise ModelError("sidecar has no 'version'")
+    version = str(sidecar["version"])
+    if version == current:
         return None
-    model_url = urljoin(url, str(sidecar["model"]))
-    async with http.get(model_url, timeout=MODEL_TIMEOUT) as resp:
+    expected = (sidecar.get("onnx") or {}).get("sha256") if isinstance(sidecar.get("onnx"), dict) else None
+    if not expected:
+        raise ModelError("sidecar has no onnx.sha256")
+    onnx_url = urljoin(url, quote(version, safe="") + ".onnx")
+    async with http.get(onnx_url, headers=headers, timeout=MODEL_TIMEOUT) as resp:
         resp.raise_for_status()
         onnx_bytes = await resp.read()
-    expected = sidecar.get("sha256")
-    if expected and hashlib.sha256(onnx_bytes).hexdigest() != str(expected).lower():
-        raise ModelError(f"sha256 mismatch for {model_url}")
+    if hashlib.sha256(onnx_bytes).hexdigest() != str(expected).lower():
+        raise ModelError(f"sha256 mismatch for {onnx_url}")
     # Validates before it replaces the cache. Both in a thread: building the
     # session takes seconds on the Pi and must not stall the camera loop.
-    model = await asyncio.to_thread(Model, sidecar, onnx_bytes)
+    model = await asyncio.to_thread(Model, sidecar, onnx_bytes, required_keys)
     await asyncio.to_thread(save_cached_model, sidecar, onnx_bytes)
     return model
 
@@ -416,7 +446,7 @@ def discovery_payload(cfg: Config, camera: Camera) -> dict:
 class Detector:
     def __init__(self, cfg: Config) -> None:
         self.cfg = cfg
-        self.model: Model | None = load_cached_model()
+        self.model: Model | None = load_cached_model(cfg.model_keys)
         if self.model:
             _LOGGER.info("Loaded cached model %s", self.model.version)
         self.smoothers = {
@@ -425,6 +455,7 @@ class Detector:
         self.last_ok = {c.id: 0.0 for c in cfg.cameras}
         self.available = {c.id: None for c in cfg.cameras}
         self._mqtt = None
+        self._telemetry: deque = deque(maxlen=TELEMETRY_MAX)
 
     async def _publish(self, topic: str, payload, retain: bool = False) -> None:
         if self._mqtt is None:
@@ -450,8 +481,13 @@ class Detector:
         if not self.cfg.model_url:
             return
         try:
-            new = await fetch_model(http, self.cfg.model_url, self.model.version if self.model else None)
-        except (aiohttp.ClientError, TimeoutError, ValueError, OSError, ModelError) as err:
+            new = await fetch_model(http, self.cfg.model_url, self.model.version if self.model else None,
+                                    self.cfg.auth, self.cfg.model_keys)
+        except ModelError as err:
+            _LOGGER.error("Model rejected (%s); %s", err,
+                          f"keeping {self.model.version}" if self.model else "no model yet")
+            return
+        except (aiohttp.ClientError, TimeoutError, ValueError, OSError) as err:
             _LOGGER.warning("Model check failed (%s); %s", err,
                             f"keeping {self.model.version}" if self.model else "no model yet")
             return
@@ -467,7 +503,7 @@ class Detector:
             return
         try:
             jpeg = await self.snapshot(http, camera)
-            probability = await asyncio.to_thread(model.predict, jpeg)
+            probability = await asyncio.to_thread(model.predict, jpeg, camera.model_key)
         except (aiohttp.ClientError, TimeoutError) as err:
             _LOGGER.debug("%s: snapshot failed: %s", camera.name, err)
             probability = None
@@ -481,7 +517,10 @@ class Detector:
                 await self._set_available(camera, False)
             return
         self.last_ok[camera.id] = now
-        occupied = self.smoothers[camera.id].add(now, probability >= model.threshold(camera.id))
+        if self.cfg.telemetry_url:
+            self._telemetry.append({"camera": camera.model_key, "ts": int(time.time()),
+                                    "p_occupied": round(probability, 6), "model_version": model.version})
+        occupied = self.smoothers[camera.id].add(now, probability >= model.threshold(camera.model_key))
         await self._publish(f"{base_topic(camera)}/state", {
             "occupied": occupied,
             "probability": round(probability * 100, 1),
@@ -495,6 +534,24 @@ class Detector:
             await self.check_model(http)
             await asyncio.sleep(self.cfg.model_check_interval if self.model else NO_MODEL_RETRY)
 
+    async def send_telemetry(self, http: aiohttp.ClientSession) -> None:
+        if not self._telemetry:
+            return
+        batch, self._telemetry = list(self._telemetry), deque(maxlen=TELEMETRY_MAX)
+        try:
+            async with http.post(self.cfg.telemetry_url, json=batch, headers=self.cfg.auth,
+                                 timeout=HTTP_TIMEOUT) as resp:
+                resp.raise_for_status()
+        except (aiohttp.ClientError, TimeoutError) as err:
+            _LOGGER.debug("Telemetry not sent (%s); %d readings kept", err, len(batch))
+            # Put them back in front of anything newer; the cap drops the oldest.
+            self._telemetry = deque([*batch, *self._telemetry], maxlen=TELEMETRY_MAX)
+
+    async def telemetry_loop(self, http: aiohttp.ClientSession) -> None:
+        while True:
+            await asyncio.sleep(TELEMETRY_EVERY)
+            await self.send_telemetry(http)
+
     async def loop(self, http: aiohttp.ClientSession) -> None:
         while True:
             started = time.monotonic()
@@ -505,11 +562,14 @@ class Detector:
         import aiomqtt
 
         async with aiohttp.ClientSession() as http:
-            model_task = asyncio.create_task(self.model_loop(http))
+            tasks = [asyncio.create_task(self.model_loop(http))]
+            if self.cfg.telemetry_url:
+                tasks.append(asyncio.create_task(self.telemetry_loop(http)))
             try:
                 await self._run_mqtt(http, aiomqtt)
             finally:
-                model_task.cancel()
+                for task in tasks:
+                    task.cancel()
 
     async def _run_mqtt(self, http: aiohttp.ClientSession, aiomqtt) -> None:
         while True:
@@ -545,10 +605,14 @@ class Detector:
                 started = time.monotonic()
                 jpeg = await self.snapshot(http, camera)
                 size = len(jpeg)
-                p = await asyncio.to_thread(self.model.predict, jpeg) if self.model else None
+                with Image.open(io.BytesIO(jpeg)) as img:  # header only: dimensions
+                    width, height = img.size
+                spec = self.model.cameras.get(camera.model_key) if self.model else None
+                p = await asyncio.to_thread(self.model.predict, jpeg, camera.model_key) if spec else None
                 jpeg = None
-                print(f"{camera.id}: {size} bytes, P(occupied)={p}, "
-                      f"threshold={self.model.threshold(camera.id) if self.model else None}, "
+                box = Model.crop_box(spec.crop, width, height) if spec else None
+                print(f"{camera.id} ({camera.model_key}): {width}x{height}, {size} bytes, crop={box}, "
+                      f"P(occupied)={p}, threshold={spec.threshold if spec else None}, "
                       f"{time.monotonic() - started:.2f}s")
 
 

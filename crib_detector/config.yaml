@@ -26,6 +26,8 @@ backup: hot
 
 options:
   model_url: ""
+  model_token: ""
+  telemetry: true
   cameras: []
   interval: 5
   on_minutes: 5
@@ -40,11 +42,14 @@ options:
 
 schema:
   model_url: str?
+  model_token: password?
+  telemetry: bool
   cameras:
     - entity_id: str
       id: match(^[a-z0-9_]+$)
       name: str
       area: str?
+      model_key: match(^[a-z0-9_.]{1,64}$)?
   interval: int(2,300)
   on_minutes: float(0.5,120)
   off_minutes: float(0.5,120)

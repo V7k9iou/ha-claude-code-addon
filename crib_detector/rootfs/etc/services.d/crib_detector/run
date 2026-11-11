@@ -15,6 +15,8 @@ fi
 
 export CAMERAS="$(jq -c '.cameras' /data/options.json)"
 export MODEL_URL="$(bashio::config 'model_url' '')"
+export MODEL_TOKEN="$(bashio::config 'model_token' '')"
+export TELEMETRY="$(bashio::config 'telemetry' 'true')"
 export MODEL_CHECK_INTERVAL="$(bashio::config 'model_check_interval' '3600')"
 export INTERVAL="$(bashio::config 'interval' '5')"
 export ON_MINUTES="$(bashio::config 'on_minutes' '5')"
