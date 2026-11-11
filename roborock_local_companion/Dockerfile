@@ -32,4 +32,4 @@ LABEL \
     org.opencontainers.image.description="Local-only map switching and status for a Matter-paired Roborock, via MQTT discovery." \
     org.opencontainers.image.source="https://github.com/talcum/ha-claude-code-addon" \
     org.opencontainers.image.licenses="MIT" \
-    org.opencontainers.image.authors="David <david.talcum489@silomails.com>"
+    org.opencontainers.image.authors="David"
